@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/Glance-Studios/Lodestone/internal/config"
 	"github.com/Glance-Studios/Lodestone/internal/health"
@@ -27,6 +32,15 @@ func main() {
 }
 
 func run() error {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Usage = usage
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("lodestoned", version)
+		return nil
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -74,10 +88,58 @@ func run() error {
 
 	fmt.Printf("lodestoned %s listening on %s (data %s)\n", version, addr, cfg.DataDir)
 
-	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
-		return fmt.Errorf("http server on %s: %w", addr, err)
+	return serve(addr, srv.Handler())
+}
+
+// shutdownGrace bounds how long a shutdown waits for in-flight requests. A
+// deploy holds its request open for the whole rollout, so this has to exceed a
+// realistic rollout: killing the process mid-rollout is how you end up with a
+// half-deployed cluster and nothing to roll it back.
+const shutdownGrace = 5 * time.Minute
+
+// serve runs the HTTP server until a termination signal arrives, then stops
+// accepting connections and waits for in-flight requests to finish.
+func serve(addr string, handler http.Handler) error {
+	srv := &http.Server{Addr: addr, Handler: handler}
+
+	// NotifyContext cancels ctx on SIGINT or SIGTERM. Kubernetes sends SIGTERM
+	// before SIGKILL, so this is the window we get to finish cleanly.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// ListenAndServe blocks, so it runs in a goroutine and reports back on a
+	// channel. Buffered, so the goroutine never blocks if we return first.
+	errs := make(chan error, 1)
+	go func() {
+		// A clean Shutdown makes ListenAndServe return ErrServerClosed, which is
+		// success rather than failure.
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs <- fmt.Errorf("http server on %s: %w", addr, err)
+			return
+		}
+		errs <- nil
+	}()
+
+	select {
+	case err := <-errs:
+		// The server stopped on its own - a bound port already in use, say.
+		return err
+
+	case <-ctx.Done():
+		fmt.Printf("shutting down, waiting up to %s for in-flight work\n", shutdownGrace)
+
+		// Stop listening, then wait for handlers to return. Note this uses a
+		// fresh context: ctx is already cancelled by the signal, and passing it
+		// would abort the shutdown instantly - the opposite of graceful.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("graceful shutdown: %w", err)
+		}
+		fmt.Println("stopped cleanly")
+		return nil
 	}
-	return nil
 }
 
 // deployPipeline builds the packager and the rollout driver from config.

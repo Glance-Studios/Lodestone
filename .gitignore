@@ -1,8 +1,10 @@
-# Compiled binaries (produced by `go build ./cmd/...`)
-/lodestoned
+# Compiled binaries. The trailing * catches cross-compiled output too -
+# `GOOS=linux go build -o lodestoned-linux` and friends.
 /lodestone
-/lodestoned.exe
-/lodestone.exe
+/lodestone-*
+/lodestoned
+/lodestoned-*
+/dist/
 *.exe
 *.dll
 *.so
