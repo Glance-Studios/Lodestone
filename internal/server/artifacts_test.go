@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/store"
 )
 
@@ -24,11 +26,22 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
+// newTestLedger returns a Ledger backed by a temp file.
+func newTestLedger(t *testing.T) *ledger.Ledger {
+	t.Helper()
+
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "ledger.json"))
+	if err != nil {
+		t.Fatalf("ledger.Open() error = %v", err)
+	}
+	return l
+}
+
 func TestUploadArtifact(t *testing.T) {
 	const token = "tok"
 	const content = "pretend jar bytes"
 
-	srv := New("test", token, newTestStore(t))
+	srv := New("test", token, newTestStore(t), newTestLedger(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader(content))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -58,7 +71,7 @@ func TestUploadArtifact(t *testing.T) {
 
 func TestUploadRejectsEmptyBody(t *testing.T) {
 	const token = "tok"
-	srv := New("test", token, newTestStore(t))
+	srv := New("test", token, newTestStore(t), newTestLedger(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader(""))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -73,7 +86,7 @@ func TestUploadRejectsEmptyBody(t *testing.T) {
 
 // Auth still guards the endpoint now that it does real work.
 func TestUploadStillNeedsToken(t *testing.T) {
-	srv := New("test", "tok", newTestStore(t))
+	srv := New("test", "tok", newTestStore(t), newTestLedger(t))
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader("bytes"))
 	rec := httptest.NewRecorder()

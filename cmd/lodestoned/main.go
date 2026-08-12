@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/Glance-Studios/Lodestone/internal/config"
+	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/server"
 	"github.com/Glance-Studios/Lodestone/internal/store"
 )
@@ -35,7 +36,12 @@ func run() error {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 
-	srv := server.New(version, cfg.Token, st)
+	led, err := ledger.Open(filepath.Join(cfg.DataDir, "ledger.json"))
+	if err != nil {
+		return fmt.Errorf("open ledger: %w", err)
+	}
+
+	srv := server.New(version, cfg.Token, st, led)
 	addr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
 
 	fmt.Printf("lodestoned %s listening on %s (data %s)\n", version, addr, cfg.DataDir)

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/store"
 )
 
@@ -18,16 +19,18 @@ type Server struct {
 	version string
 	token   string
 	store   *store.Store
+	ledger  *ledger.Ledger
 	started time.Time
 }
 
 // New returns a Server stamped with running version and the token that guards
 // protected endpoints.
-func New(version, token string, st *store.Store) *Server {
+func New(version, token string, st *store.Store, l *ledger.Ledger) *Server {
 	return &Server{
 		version: version,
 		token:   token,
 		store:   st,
+		ledger:  l,
 		started: time.Now(),
 	}
 }
@@ -41,8 +44,23 @@ func (s *Server) Handler() http.Handler {
 	// Protected: wrapped in the auth middleware.
 	requireToken := RequireToken(s.token)
 	mux.Handle("POST /artifacts", requireToken(http.HandlerFunc(s.handleArtifacts)))
+	mux.Handle("GET /artifacts", requireToken(http.HandlerFunc(s.handleListArtifacts)))
 
 	return mux
+}
+
+// handleListArtifacts returns the ledger, newest first.
+func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
+	entries := s.ledger.Entries()
+	if entries == nil {
+		// Marshal nil as [] rather than null - the nil-vs-empty-slice trap.
+		entries = []ledger.Entry{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		return
+	}
 }
 
 // handleArtifacts accepts an uploaded artifact, stores it by content digest and
@@ -66,6 +84,20 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 
 	if art.Size == 0 {
 		http.Error(w, "empty artifact", http.StatusBadRequest)
+		return
+	}
+
+	// Record it. The artifact bytes are already safe on disk, so a ledger
+	// failure means we have an artifact we cannot account for - report it
+	// rather than pretending the upload succeeded.
+	entry := ledger.Entry{
+		Digest:  art.Digest,
+		Size:    art.Size,
+		Version: r.URL.Query().Get("version"),
+		By:      r.URL.Query().Get("by"),
+	}
+	if err := s.ledger.Append(entry); err != nil {
+		http.Error(w, "recording artifact failed", http.StatusInternalServerError)
 		return
 	}
 
