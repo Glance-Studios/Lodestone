@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/Glance-Studios/Lodestone/internal/config"
+	"github.com/Glance-Studios/Lodestone/internal/health"
+	"github.com/Glance-Studios/Lodestone/internal/image"
+	"github.com/Glance-Studios/Lodestone/internal/k8s"
 	"github.com/Glance-Studios/Lodestone/internal/ledger"
+	"github.com/Glance-Studios/Lodestone/internal/rollout"
 	"github.com/Glance-Studios/Lodestone/internal/server"
 	"github.com/Glance-Studios/Lodestone/internal/store"
 )
@@ -41,7 +46,30 @@ func run() error {
 		return fmt.Errorf("open ledger: %w", err)
 	}
 
-	srv := server.New(version, cfg.Token, st, led)
+	opts := server.Options{
+		Version: version,
+		Token:   cfg.Token,
+		Store:   st,
+		Ledger:  led,
+	}
+
+	// Deploying is opt-in: without a configured target the agent is still a
+	// useful upload-and-ledger service, and POST /deploy answers 501.
+	if cfg.DeployEnabled() {
+		packager, deployer, err := deployPipeline(cfg)
+		if err != nil {
+			return err
+		}
+		opts.Packager = packager
+		opts.Deployer = deployer
+
+		fmt.Printf("deploy target: %s/%s container %s\n", cfg.Namespace, cfg.Deployment, cfg.Container)
+		fmt.Printf("packaging:     %s -> %s at %s\n", cfg.BaseImage, cfg.Repo, cfg.DestPath)
+	} else {
+		fmt.Println("deploy target: not configured (POST /deploy disabled)")
+	}
+
+	srv := server.New(opts)
 	addr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
 
 	fmt.Printf("lodestoned %s listening on %s (data %s)\n", version, addr, cfg.DataDir)
@@ -50,4 +78,45 @@ func run() error {
 		return fmt.Errorf("http server on %s: %w", addr, err)
 	}
 	return nil
+}
+
+// deployPipeline builds the packager and the rollout driver from config.
+func deployPipeline(cfg config.Config) (server.Packager, server.Deployer, error) {
+	clientset, err := k8s.NewClientset(cfg.Kubeconfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+
+	target := k8s.NewDeployment(clientset, cfg.Namespace, cfg.Deployment, cfg.Container)
+
+	packager := &image.Packager{
+		Base:     cfg.BaseImage,
+		Repo:     cfg.Repo,
+		DestPath: cfg.DestPath,
+	}
+
+	rolloutOpts := rollout.Options{Checks: healthChecks(cfg)}
+
+	// A closure adapts rollout.Deploy to the narrow Deployer signature the
+	// server wants, binding the target and options here rather than leaking
+	// them into the HTTP layer.
+	deployer := func(ctx context.Context, imageRef string) <-chan rollout.Event {
+		return rollout.Deploy(ctx, target, imageRef, rolloutOpts)
+	}
+
+	return packager, deployer, nil
+}
+
+// healthChecks builds the gate from config. Returns nil when nothing is
+// configured, which rollout treats as "settled is good enough".
+func healthChecks(cfg config.Config) []health.Check {
+	var checks []health.Check
+
+	if cfg.HealthURL != "" {
+		checks = append(checks, health.HTTPCheck{URL: cfg.HealthURL})
+	}
+	if cfg.HealthAddr != "" {
+		checks = append(checks, health.TCPCheck{Addr: cfg.HealthAddr})
+	}
+	return checks
 }

@@ -21,17 +21,34 @@ type Server struct {
 	store   *store.Store
 	ledger  *ledger.Ledger
 	started time.Time
+
+	// Both nil unless deploying is configured; POST /deploy 501s without them.
+	packager Packager
+	deployer Deployer
 }
 
-// New returns a Server stamped with running version and the token that guards
-// protected endpoints.
-func New(version, token string, st *store.Store, l *ledger.Ledger) *Server {
+// Options are Server's dependencies. A struct rather than more positional
+// arguments, because five of them was already one too many.
+type Options struct {
+	Version  string
+	Token    string
+	Store    *store.Store
+	Ledger   *ledger.Ledger
+	Packager Packager // optional
+	Deployer Deployer // optional
+}
+
+// New returns a Server. Deploying is enabled only when both Packager and
+// Deployer are supplied.
+func New(opts Options) *Server {
 	return &Server{
-		version: version,
-		token:   token,
-		store:   st,
-		ledger:  l,
-		started: time.Now(),
+		version:  opts.Version,
+		token:    opts.Token,
+		store:    opts.Store,
+		ledger:   opts.Ledger,
+		packager: opts.Packager,
+		deployer: opts.Deployer,
+		started:  time.Now(),
 	}
 }
 
@@ -45,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	requireToken := RequireToken(s.token)
 	mux.Handle("POST /artifacts", requireToken(http.HandlerFunc(s.handleArtifacts)))
 	mux.Handle("GET /artifacts", requireToken(http.HandlerFunc(s.handleListArtifacts)))
+	mux.Handle("POST /deploy", requireToken(http.HandlerFunc(s.handleDeploy)))
 
 	return mux
 }

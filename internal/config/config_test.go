@@ -13,7 +13,12 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 
-	want := Config{Addr: "0.0.0.0", Port: 8080, DataDir: "/var/lib/lodestone"}
+	want := Config{
+		Addr:     "0.0.0.0",
+		Port:     8080,
+		DataDir:  "/var/lib/lodestone",
+		DestPath: "/plugins/app.jar",
+	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}
@@ -30,9 +35,50 @@ func TestLoadFromEnv(t *testing.T) {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 
-	want := Config{Addr: "127.0.0.1", Port: 9000, DataDir: "/tmp/lodestone", Token: "sekret"}
+	want := Config{
+		Addr:     "127.0.0.1",
+		Port:     9000,
+		DataDir:  "/tmp/lodestone",
+		Token:    "sekret",
+		DestPath: "/plugins/app.jar",
+	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
+	}
+}
+
+func TestDeployEnabled(t *testing.T) {
+	full := Config{
+		BaseImage:  "ghcr.io/x/paper:1.21",
+		Repo:       "ghcr.io/x/builds",
+		Namespace:  "game",
+		Deployment: "paper-lobby",
+		Container:  "paper",
+	}
+
+	if !full.DeployEnabled() {
+		t.Error("DeployEnabled() = false for a fully configured target")
+	}
+
+	// Every field is required: drop any one and deploying must stay off, so a
+	// half-configured agent never tries to deploy.
+	tests := map[string]func(*Config){
+		"no base image": func(c *Config) { c.BaseImage = "" },
+		"no repo":       func(c *Config) { c.Repo = "" },
+		"no namespace":  func(c *Config) { c.Namespace = "" },
+		"no deployment": func(c *Config) { c.Deployment = "" },
+		"no container":  func(c *Config) { c.Container = "" },
+	}
+
+	for name, drop := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := full // a struct copy, so each case starts clean
+			drop(&cfg)
+
+			if cfg.DeployEnabled() {
+				t.Errorf("DeployEnabled() = true with %s", name)
+			}
+		})
 	}
 }
 

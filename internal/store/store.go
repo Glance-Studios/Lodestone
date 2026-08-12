@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Write artifacts into a directory, each file names by its SHA-256 digest
@@ -26,6 +27,18 @@ func New(dir string) (*Store, error) {
 type Artifact struct {
 	Digest string `json:"digest"` // "sha256:" + hex
 	Size   int64  `json:"size"`   // bytes written
+}
+
+// Open returns the stored artifact's bytes for reading. The caller closes it.
+//
+// The digest-to-filename mapping lives here rather than in callers, so the
+// on-disk layout stays this package's business.
+func (s *Store) Open(digest string) (io.ReadCloser, error) {
+	f, err := os.Open(filepath.Join(s.dir, strings.TrimPrefix(digest, "sha256:")+".jar"))
+	if err != nil {
+		return nil, fmt.Errorf("open artifact %s: %w", digest, err)
+	}
+	return f, nil
 }
 
 // Put streams the artifact from r into the store

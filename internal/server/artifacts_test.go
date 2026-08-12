@@ -41,7 +41,7 @@ func TestUploadArtifact(t *testing.T) {
 	const token = "tok"
 	const content = "pretend jar bytes"
 
-	srv := New("test", token, newTestStore(t), newTestLedger(t))
+	srv := New(Options{Version: "test", Token: token, Store: newTestStore(t), Ledger: newTestLedger(t)})
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader(content))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -71,7 +71,7 @@ func TestUploadArtifact(t *testing.T) {
 
 func TestUploadRejectsEmptyBody(t *testing.T) {
 	const token = "tok"
-	srv := New("test", token, newTestStore(t), newTestLedger(t))
+	srv := New(Options{Version: "test", Token: token, Store: newTestStore(t), Ledger: newTestLedger(t)})
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader(""))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -86,7 +86,7 @@ func TestUploadRejectsEmptyBody(t *testing.T) {
 
 // Auth still guards the endpoint now that it does real work.
 func TestUploadStillNeedsToken(t *testing.T) {
-	srv := New("test", "tok", newTestStore(t), newTestLedger(t))
+	srv := New(Options{Version: "test", Token: "tok", Store: newTestStore(t), Ledger: newTestLedger(t)})
 
 	req := httptest.NewRequest(http.MethodPost, "/artifacts", strings.NewReader("bytes"))
 	rec := httptest.NewRecorder()
