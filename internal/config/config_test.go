@@ -6,6 +6,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LODESTONE_ADDR", "")
 	t.Setenv("LODESTONE_PORT", "")
 	t.Setenv("LODESTONE_DATA_DIR", "")
+	t.Setenv("LODESTONE_TOKEN", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -22,13 +23,14 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("LODESTONE_ADDR", "127.0.0.1")
 	t.Setenv("LODESTONE_PORT", "9000")
 	t.Setenv("LODESTONE_DATA_DIR", "/tmp/lodestone")
+	t.Setenv("LODESTONE_TOKEN", "sekret")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 
-	want := Config{Addr: "127.0.0.1", Port: 9000, DataDir: "/tmp/lodestone"}
+	want := Config{Addr: "127.0.0.1", Port: 9000, DataDir: "/tmp/lodestone", Token: "sekret"}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}

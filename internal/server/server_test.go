@@ -8,7 +8,7 @@ import (
 )
 
 func TestStatusOK(t *testing.T) {
-	srv := New("test-1.2.3")
+	srv := New("test-1.2.3", "")
 
 	// httptest builds a request and records the response in memory - no socket
 	// is opened, so the test is fast and needs no free port
@@ -39,7 +39,7 @@ func TestStatusOK(t *testing.T) {
 }
 
 func TestStatusRejectsPost(t *testing.T) {
-	srv := New("test")
+	srv := New("test", "")
 
 	req := httptest.NewRequest(http.MethodPost, "/status", nil)
 	rec := httptest.NewRecorder()

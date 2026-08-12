@@ -10,6 +10,7 @@ type Config struct {
 	Addr    string // iface address to listen on
 	Port    int    // TCP port
 	DataDir string // dir for the ledger and cached data
+	Token   string // bearer token for protected endpoints; empty = fail closed
 }
 
 const (
@@ -24,6 +25,7 @@ func Load() (Config, error) {
 		Addr:    envOr("LODESTONE_ADDR", defaultAddr),
 		Port:    defaultPort,
 		DataDir: envOr("LODESTONE_DATA_DIR", defaultDataDir),
+		Token:   os.Getenv("LODESTONE_TOKEN"),
 	}
 
 	if s := os.Getenv("LODESTONE_PORT"); s != "" {

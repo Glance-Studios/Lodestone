@@ -9,21 +9,36 @@ import (
 // Server holds the API's deps & state
 type Server struct {
 	version string
+	token   string
 	started time.Time
 }
 
-// New returns a Server stamped with running version
-func New(version string) *Server {
+// New returns a Server stamped with running version and the token that guards
+// protected endpoints.
+func New(version, token string) *Server {
 	return &Server{
 		version: version,
+		token:   token,
 		started: time.Now(),
 	}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Public: health probes need to reach this without a token.
 	mux.HandleFunc("GET /status", s.handleStatus)
+
+	// Protected: wrapped in the auth middleware.
+	requireToken := RequireToken(s.token)
+	mux.Handle("POST /artifacts", requireToken(http.HandlerFunc(s.handleArtifacts)))
+
 	return mux
+}
+
+// handleArtifacts will accept an uploaded artifact. Stubbed until step 4.
+func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "not implemented", http.StatusNotImplemented)
 }
 
 // Status is the JSON body returned by GET /status

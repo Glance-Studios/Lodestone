@@ -24,7 +24,11 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	srv := server.New(version)
+	if cfg.Token == "" {
+		fmt.Fprintln(os.Stderr, "warning: LODESTONE_TOKEN not set; protected endpoints will reject every request")
+	}
+
+	srv := server.New(version, cfg.Token)
 	addr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
 
 	fmt.Printf("lodestoned %s listening on %s (data %s)\n", version, addr, cfg.DataDir)
