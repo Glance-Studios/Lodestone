@@ -1,0 +1,28 @@
+# Compiled binaries (produced by `go build ./cmd/...`)
+/lodestoned
+/lodestone
+/lodestoned.exe
+/lodestone.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage output
+*.test
+*.out
+coverage.*
+
+# Go workspace files (local, machine-specific)
+go.work
+go.work.sum
+
+# Local environment / secrets — never commit these
+.env
+*.local
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
