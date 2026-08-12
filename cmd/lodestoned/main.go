@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/Glance-Studios/Lodestone/internal/config"
 	"github.com/Glance-Studios/Lodestone/internal/server"
+	"github.com/Glance-Studios/Lodestone/internal/store"
 )
 
 var version = "dev"
@@ -28,7 +30,12 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "warning: LODESTONE_TOKEN not set; protected endpoints will reject every request")
 	}
 
-	srv := server.New(version, cfg.Token)
+	st, err := store.New(filepath.Join(cfg.DataDir, "artifacts"))
+	if err != nil {
+		return fmt.Errorf("open artifact store: %w", err)
+	}
+
+	srv := server.New(version, cfg.Token, st)
 	addr := fmt.Sprintf("%s:%d", cfg.Addr, cfg.Port)
 
 	fmt.Printf("lodestoned %s listening on %s (data %s)\n", version, addr, cfg.DataDir)
