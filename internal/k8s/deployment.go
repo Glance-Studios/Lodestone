@@ -104,35 +104,73 @@ func (d *Deployment) Rollback(ctx context.Context, toImage string, toReplicas *i
 	return d.patch(ctx, toImage, toReplicas)
 }
 
-// patch sets the container's image, and optionally the replica count, with a
-// strategic merge patch - so only those fields are sent and concurrent edits
-// elsewhere are not clobbered.
+// fieldManager is the name Lodestone owns its fields under. It appears in
+// managedFields, and in the conflict message anyone else's apply will get if
+// they try to claim the same fields.
+const fieldManager = "lodestone"
+
+// patch declares the container's image and the replica count via a server-side
+// apply.
+//
+// Server-side apply rather than a strategic merge patch, so field ownership is
+// explicit: a `kubectl apply` that also declares the image gets a conflict naming
+// lodestone, instead of silently overwriting a deployed digest. A manifest that
+// omits the image is unaffected and can be reapplied freely.
+//
+// Replicas is always declared, even when this deploy is not changing it. Under
+// SSA a manager's fields are *removed* when it stops declaring them, so applying
+// {image, replicas} on a scaling deploy and {image} on the next would delete
+// spec.replicas and silently scale the workload back to the default of 1.
+// Declaring the current count instead keeps ownership stable and writes the truth.
 func (d *Deployment) patch(ctx context.Context, image string, replicas *int32) error {
-	spec := map[string]any{
-		"template": map[string]any{
-			"spec": map[string]any{
-				"containers": []map[string]any{
-					{"name": d.container, "image": image},
+	want := replicas
+	if want == nil {
+		current, err := d.Replicas(ctx)
+		if err != nil {
+			return err
+		}
+		want = &current
+	}
+
+	// An apply body is a partial object, so it needs its own apiVersion and kind -
+	// unlike a merge patch, which is just a fragment.
+	//
+	// Built with json.Marshal rather than string formatting, so an image reference
+	// containing anything awkward cannot break the document.
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": d.name, "namespace": d.namespace},
+		"spec": map[string]any{
+			"replicas": *want,
+			"template": map[string]any{
+				"spec": map[string]any{
+					// containers is a map-type list keyed by name, so naming one
+					// container merges rather than replacing the whole list.
+					"containers": []map[string]any{
+						{"name": d.container, "image": image},
+					},
 				},
 			},
 		},
-	}
-	if replicas != nil {
-		spec["replicas"] = *replicas
+	})
+	if err != nil {
+		return fmt.Errorf("build apply: %w", err)
 	}
 
-	// Built with json.Marshal rather than string formatting, so an image
-	// reference containing anything awkward cannot break the document.
-	patch, err := json.Marshal(map[string]any{"spec": spec})
-	if err != nil {
-		return fmt.Errorf("build patch: %w", err)
-	}
+	// Force: Lodestone asserts ownership of these fields. Whoever held them before
+	// - a client-side apply, a previous manager - gives them up. Without it the
+	// first deploy after switching to SSA would fail on a conflict it cannot fix.
+	force := true
 
 	_, err = d.client.AppsV1().Deployments(d.namespace).Patch(
-		ctx, d.name, types.StrategicMergePatchType, patch, metav1.PatchOptions{},
+		ctx, d.name, types.ApplyPatchType, body, metav1.PatchOptions{
+			FieldManager: fieldManager,
+			Force:        &force,
+		},
 	)
 	if err != nil {
-		return fmt.Errorf("patch %s to %s: %w", d.Describe(), image, err)
+		return fmt.Errorf("apply %s image %s: %w", d.Describe(), image, err)
 	}
 	return nil
 }

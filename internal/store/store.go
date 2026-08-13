@@ -31,24 +31,43 @@ type Artifact struct {
 	Size   int64  `json:"size"`   // bytes written
 }
 
-// Open returns the stored artifact's bytes for reading. The caller closes it.
+// File is a stored artifact opened for reading.
+//
+// It supports random access as well as streaming, because validating an archive
+// means reading its index - and a zip keeps that at the end of the file, not the
+// start.
+type File interface {
+	io.ReadCloser
+	io.ReaderAt
+}
+
+// Open returns the stored artifact for reading, with its size. The caller closes
+// it.
 //
 // The digest-to-filename mapping lives here rather than in callers, so the
 // on-disk layout stays this package's business.
-func (s *Store) Open(digest string) (io.ReadCloser, error) {
-	f, err := os.Open(filepath.Join(s.dir, strings.TrimPrefix(digest, "sha256:")+".jar"))
+func (s *Store) Open(digest string) (File, int64, error) {
+	f, err := os.Open(s.path(digest))
 	if err != nil {
-		return nil, fmt.Errorf("open artifact %s: %w", digest, err)
+		return nil, 0, fmt.Errorf("open artifact %s: %w", digest, err)
 	}
-	return f, nil
+
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, fmt.Errorf("stat artifact %s: %w", digest, err)
+	}
+	return f, info.Size(), nil
+}
+
+func (s *Store) path(digest string) string {
+	return filepath.Join(s.dir, strings.TrimPrefix(digest, "sha256:")+".jar")
 }
 
 // Remove deletes a stored artifact. A digest that is already gone is not an
 // error: pruning runs repeatedly and must be idempotent.
 func (s *Store) Remove(digest string) error {
-	path := filepath.Join(s.dir, strings.TrimPrefix(digest, "sha256:")+".jar")
-
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := os.Remove(s.path(digest)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove artifact %s: %w", digest, err)
 	}
 	return nil

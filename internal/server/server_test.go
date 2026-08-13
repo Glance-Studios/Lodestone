@@ -171,7 +171,7 @@ func TestUploadReturnsDigest(t *testing.T) {
 func TestUploadRejectsEmptyBody(t *testing.T) {
 	f := newFixture(t)
 
-	rec := f.do(t, http.MethodPost, "/artifacts/dev-lobby", devToken, "")
+	rec := f.doRaw(t, http.MethodPost, "/artifacts/dev-lobby", devToken, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("code = %d, want 400", rec.Code)
 	}

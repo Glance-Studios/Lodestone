@@ -1,7 +1,9 @@
 package server
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,14 +58,17 @@ func (d *recordingDeployer) deploy(ctx context.Context, imageRef string, replica
 	return ch
 }
 
-func newStore(t *testing.T) *store.Store {
+// newStore returns a store and the directory it lives in, so a test can also
+// assert what is actually on disk.
+func newStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
 
-	st, err := store.New(t.TempDir())
+	dir := t.TempDir()
+	st, err := store.New(dir)
 	if err != nil {
 		t.Fatalf("store.New() error = %v", err)
 	}
-	return st
+	return st, dir
 }
 
 func newLedger(t *testing.T) *ledger.Ledger {
@@ -107,8 +113,9 @@ func (p *uniquePackager) Package(ctx context.Context, r io.Reader) (image.Built,
 // fixture is a server with two targets, dev and prod, each with its own token,
 // ledger, packager and deployer.
 type fixture struct {
-	srv   *Server
-	store *store.Store
+	srv      *Server
+	store    *store.Store
+	storeDir string
 
 	devPackager *uniquePackager
 	devDeployer *recordingDeployer
@@ -141,8 +148,11 @@ func newFixtureWithRetain(t *testing.T, retain int) *fixture {
 func build(t *testing.T, devOK, prodOK bool, retain int) *fixture {
 	t.Helper()
 
+	st, dir := newStore(t)
+
 	f := &fixture{
-		store:        newStore(t),
+		store:        st,
+		storeDir:     dir,
 		devPackager:  &uniquePackager{prefix: "reg/dev/lobby"},
 		devDeployer:  &recordingDeployer{succeed: devOK},
 		devLedger:    newLedger(t),
@@ -184,8 +194,57 @@ func (f *fixture) setDeleter(name string, d Deleter) {
 	f.srv.targets[name].Deleter = d
 }
 
-// do sends a request and returns the recorder.
-func (f *fixture) do(t *testing.T, method, path, token, body string) *httptest.ResponseRecorder {
+// storeEntries lists what is actually on disk in the artifact store.
+func storeEntries(f *fixture) ([]string, error) {
+	entries, err := os.ReadDir(f.storeDir)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Name())
+	}
+	return out, nil
+}
+
+// zipped wraps content in a minimal valid zip archive.
+//
+// Uploads must be archives, so a test payload has to be one. The content still
+// varies per call, which is what keeps each deploy's digest distinct.
+func zipped(t *testing.T, content string) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	w, err := zw.Create("payload.txt")
+	if err != nil {
+		t.Fatalf("creating zip entry: %v", err)
+	}
+	if _, err := w.Write([]byte(content)); err != nil {
+		t.Fatalf("writing zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing zip: %v", err)
+	}
+	return buf.String()
+}
+
+// do sends a request whose body is content wrapped in a valid archive.
+func (f *fixture) do(t *testing.T, method, path, token, content string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	body := content
+	if content != "" {
+		body = zipped(t, content)
+	}
+	return f.doRaw(t, method, path, token, body)
+}
+
+// doRaw sends the body exactly as given, for tests about what the body *is* -
+// an empty upload, or something that is not an archive.
+func (f *fixture) doRaw(t *testing.T, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -199,10 +258,10 @@ func (f *fixture) do(t *testing.T, method, path, token, body string) *httptest.R
 }
 
 // stream sends a request asking for NDJSON.
-func (f *fixture) stream(t *testing.T, path, token, body string) *httptest.ResponseRecorder {
+func (f *fixture) stream(t *testing.T, path, token, content string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(zipped(t, content)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", api.ContentTypeNDJSON)
 	rec := httptest.NewRecorder()

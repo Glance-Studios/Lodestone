@@ -69,7 +69,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	}
 
 	// Re-open the stored artifact rather than buffering the upload in memory.
-	f, err := s.store.Open(art.Digest)
+	f, _, err := s.store.Open(art.Digest)
 	if err != nil {
 		http.Error(w, "reopening artifact failed", http.StatusInternalServerError)
 		return
@@ -165,6 +165,22 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 	}
 	if art.Size == 0 {
 		http.Error(w, "empty artifact", http.StatusBadRequest)
+		return store.Artifact{}, false
+	}
+
+	// Reject anything that is not an archive, before it reaches the ledger. A
+	// truncated upload or the wrong file otherwise costs a full rollout to
+	// discover, and leaves a ledger entry for something that was never shippable.
+	//
+	// The check needs the stored file rather than the request body, because a
+	// zip's central directory is at the end and the body has already been consumed.
+	if err := s.validateArchive(art.Digest); err != nil {
+		// Remove it: an unshippable artifact should not linger in the store, and
+		// nothing references it yet.
+		if rmErr := s.store.Remove(art.Digest); rmErr != nil {
+			fmt.Fprintf(os.Stderr, "lodestoned: remove rejected artifact %s: %v\n", art.Digest, rmErr)
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return store.Artifact{}, false
 	}
 

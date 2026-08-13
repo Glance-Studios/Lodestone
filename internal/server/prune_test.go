@@ -103,7 +103,7 @@ func TestPruneKeepsArtifactsAnotherTargetStillNeeds(t *testing.T) {
 	// Close it: on Windows an open handle stops the temp directory being removed,
 	// and t.TempDir's cleanup failure would fail the test even though the
 	// assertion passed.
-	rc, err := f.store.Open(sharedDigest)
+	rc, _, err := f.store.Open(sharedDigest)
 	if err != nil {
 		t.Fatalf("the shared artifact was deleted while prod still references it: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestPruneRemovesUnreferencedArtifacts(t *testing.T) {
 		}
 	}
 
-	if rc, err := f.store.Open(firstDigest); err == nil {
+	if rc, _, err := f.store.Open(firstDigest); err == nil {
 		rc.Close()
 		t.Error("an unreferenced artifact was left on disk")
 	}

@@ -38,9 +38,10 @@ func TestDeployHappyPath(t *testing.T) {
 		t.Error("Events is empty")
 	}
 
-	// The packager gets the bytes read back from the store, not the request body.
-	if f.devPackager.gotBytes != "jar bytes" {
-		t.Errorf("packager got %q", f.devPackager.gotBytes)
+	// The packager gets the stored bytes back verbatim - the archive as uploaded,
+	// read from the store rather than from the request body.
+	if f.devPackager.gotBytes != zipped(t, "jar bytes") {
+		t.Errorf("packager got %d bytes, want the uploaded archive", len(f.devPackager.gotBytes))
 	}
 	// And the other target was untouched.
 	if f.prodPackager.gotBytes != "" {
