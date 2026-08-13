@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,9 +104,9 @@ func (c *Client) Status(ctx context.Context) (api.Status, error) {
 	return out, nil
 }
 
-// Ledger fetches GET /artifacts.
-func (c *Client) Ledger(ctx context.Context) ([]api.LedgerEntry, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/artifacts", nil)
+// Ledger fetches one target's ledger.
+func (c *Client) Ledger(ctx context.Context, target string) ([]api.LedgerEntry, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "/artifacts/"+target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -123,10 +124,14 @@ func (c *Client) Ledger(ctx context.Context) ([]api.LedgerEntry, error) {
 	return out, nil
 }
 
-// UploadOptions carries the metadata stamped onto a ledger entry.
+// UploadOptions carries the metadata stamped onto a ledger entry, and the
+// replica count a deploy asks for.
 type UploadOptions struct {
 	Version string
 	By      string
+
+	// Replicas scales the target as part of the deploy. Nil leaves it alone.
+	Replicas *int32
 }
 
 func (o UploadOptions) query() string {
@@ -137,15 +142,18 @@ func (o UploadOptions) query() string {
 	if o.By != "" {
 		q.Set("by", o.By)
 	}
+	if o.Replicas != nil {
+		q.Set("replicas", strconv.FormatInt(int64(*o.Replicas), 10))
+	}
 	if len(q) == 0 {
 		return ""
 	}
 	return "?" + q.Encode()
 }
 
-// Push uploads an artifact without deploying it.
-func (c *Client) Push(ctx context.Context, r io.Reader, opts UploadOptions) (api.Artifact, error) {
-	req, err := c.newRequest(ctx, http.MethodPost, "/artifacts"+opts.query(), r)
+// Push uploads an artifact to a target without deploying it.
+func (c *Client) Push(ctx context.Context, target string, r io.Reader, opts UploadOptions) (api.Artifact, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, "/artifacts/"+target+opts.query(), r)
 	if err != nil {
 		return api.Artifact{}, err
 	}
@@ -174,8 +182,8 @@ var ErrNoResult = errors.New("stream ended without a result")
 // Note the outcome comes from that line, not from the HTTP status: the server
 // commits to 200 when it writes the first byte, long before it knows whether the
 // rollout worked.
-func (c *Client) Deploy(ctx context.Context, r io.Reader, opts UploadOptions, onEvent func(api.Event)) (api.Result, error) {
-	req, err := c.newRequest(ctx, http.MethodPost, "/deploy"+opts.query(), r)
+func (c *Client) Deploy(ctx context.Context, target string, r io.Reader, opts UploadOptions, onEvent func(api.Event)) (api.Result, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, "/deploy/"+target+opts.query(), r)
 	if err != nil {
 		return api.Result{}, err
 	}

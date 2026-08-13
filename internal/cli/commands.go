@@ -65,7 +65,7 @@ func runStatus(ctx context.Context, env Env, g Globals, args []string) error {
 		return err
 	}
 
-	client, name, err := g.client()
+	client, name, _, err := g.client()
 	if err != nil {
 		return err
 	}
@@ -85,6 +85,11 @@ func runStatus(ctx context.Context, env Env, g Globals, args []string) error {
 	fmt.Fprintf(env.Out, "status   %s\n", st.Status)
 	fmt.Fprintf(env.Out, "version  %s\n", st.Version)
 	fmt.Fprintf(env.Out, "uptime   %s\n", st.Uptime)
+	if len(st.Targets) > 0 {
+		fmt.Fprintf(env.Out, "targets  %s\n", strings.Join(st.Targets, ", "))
+	} else {
+		fmt.Fprintln(env.Out, "targets  none configured")
+	}
 	return nil
 }
 
@@ -96,9 +101,14 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 		return err
 	}
 
-	client, _, err := g.client()
+	client, _, cctx, err := g.client()
 	if err != nil {
 		return err
+	}
+
+	name, err := g.target(cctx)
+	if err != nil {
+		return usageErr(err.Error())
 	}
 
 	f, err := os.Open(path)
@@ -107,13 +117,22 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 	}
 	defer f.Close()
 
-	opts := UploadOptions{Version: os.Getenv("LODESTONE_VERSION"), By: whoami()}
+	opts := UploadOptions{
+		Version:  os.Getenv("LODESTONE_VERSION"),
+		By:       whoami(),
+		Replicas: g.replicas(),
+	}
 
 	// In JSON mode stay silent until the end, so stdout is a single parseable
 	// document. Otherwise narrate as the events arrive.
 	onEvent := func(e api.Event) {}
 	if !g.JSON {
-		fmt.Fprintf(env.Out, "deploying %s\n", path)
+		fmt.Fprintf(env.Out, "deploying %s to %s", path, name)
+		if opts.Replicas != nil {
+			fmt.Fprintf(env.Out, " (%d replicas)", *opts.Replicas)
+		}
+		fmt.Fprintln(env.Out)
+
 		onEvent = func(e api.Event) {
 			fmt.Fprintf(env.Out, "  %-13s %s\n", e.Phase, e.Message)
 			if e.Error != "" {
@@ -122,7 +141,7 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 		}
 	}
 
-	res, err := client.Deploy(ctx, f, opts, onEvent)
+	res, err := client.Deploy(ctx, name, f, opts, onEvent)
 	if err != nil {
 		return err
 	}
@@ -162,9 +181,14 @@ func runPush(ctx context.Context, env Env, g Globals, args []string) error {
 		return err
 	}
 
-	client, _, err := g.client()
+	client, _, cctx, err := g.client()
 	if err != nil {
 		return err
+	}
+
+	name, err := g.target(cctx)
+	if err != nil {
+		return usageErr(err.Error())
 	}
 
 	f, err := os.Open(path)
@@ -173,7 +197,7 @@ func runPush(ctx context.Context, env Env, g Globals, args []string) error {
 	}
 	defer f.Close()
 
-	art, err := client.Push(ctx, f, UploadOptions{
+	art, err := client.Push(ctx, name, f, UploadOptions{
 		Version: os.Getenv("LODESTONE_VERSION"),
 		By:      whoami(),
 	})
@@ -195,15 +219,20 @@ func runLedger(ctx context.Context, env Env, g Globals, args []string) error {
 		return err
 	}
 
-	client, _, err := g.client()
+	client, _, cctx, err := g.client()
 	if err != nil {
 		return err
+	}
+
+	name, err := g.target(cctx)
+	if err != nil {
+		return usageErr(err.Error())
 	}
 
 	ctx, cancel := WithShortTimeout(ctx)
 	defer cancel()
 
-	entries, err := client.Ledger(ctx)
+	entries, err := client.Ledger(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -253,15 +282,23 @@ func runLogin(ctx context.Context, env Env, g Globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Set(name, Context{API: g.API, Token: g.Token})
+	cfg.Set(name, Context{API: g.API, Token: g.Token, Target: g.Target})
 	if err := cfg.Save(); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(env.Out, "saved context %q -> %s\n", name, g.API)
+	fmt.Fprintf(env.Out, "saved context %q -> %s", name, g.API)
+	if g.Target != "" {
+		fmt.Fprintf(env.Out, " (target %s)", g.Target)
+	}
+	fmt.Fprintln(env.Out)
 	fmt.Fprintf(env.Out, "config %s\n", cfg.Path())
+
 	if g.Token == "" {
 		fmt.Fprintln(env.Err, "warning: no --token given; protected commands will be rejected")
+	}
+	if g.Target == "" {
+		fmt.Fprintln(env.Err, "warning: no --target given; commands will need --target")
 	}
 	return nil
 }
@@ -301,12 +338,18 @@ func runContexts(ctx context.Context, env Env, g Globals, args []string) error {
 		if n == cfg.Default {
 			marker = "* "
 		}
+		c := cfg.Contexts[n]
+
 		// Never print the token. Report only whether one is set.
 		token := "no token"
-		if cfg.Contexts[n].Token != "" {
+		if c.Token != "" {
 			token = "token set"
 		}
-		fmt.Fprintf(env.Out, "%s%-12s %-32s %s\n", marker, n, cfg.Contexts[n].API, token)
+		tgt := c.Target
+		if tgt == "" {
+			tgt = "-"
+		}
+		fmt.Fprintf(env.Out, "%s%-12s %-30s %-14s %s\n", marker, n, c.API, tgt, token)
 	}
 	return nil
 }

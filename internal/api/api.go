@@ -28,10 +28,12 @@ type Event struct {
 // Result is the outcome of a deploy. In a stream it is the final line; in a
 // non-streamed response it is the whole body, with Events filled in.
 type Result struct {
-	Kind     string  `json:"kind,omitempty"` // KindResult when streamed
-	Digest   string  `json:"digest"`         // the artifact's sha256
-	Image    string  `json:"image"`          // the pushed image reference
-	Deployed bool    `json:"deployed"`       // did the rollout succeed
+	Kind     string  `json:"kind,omitempty"`   // KindResult when streamed
+	Target   string  `json:"target,omitempty"` // which workload this deployed to
+	Digest   string  `json:"digest"`           // the artifact's sha256
+	Image    string  `json:"image"`            // the pushed image reference
+	Replicas *int32  `json:"replicas,omitempty"`
+	Deployed bool    `json:"deployed"` // did the rollout succeed
 	Error    string  `json:"error,omitempty"`
 	Events   []Event `json:"events,omitempty"` // non-streamed responses only
 }
@@ -46,10 +48,13 @@ type Artifact struct {
 type LedgerEntry struct {
 	Digest   string    `json:"digest"`
 	Size     int64     `json:"size"`
+	Target   string    `json:"target,omitempty"`
 	Version  string    `json:"version,omitempty"`
 	By       string    `json:"by,omitempty"`
 	At       time.Time `json:"at"`
+	Replicas *int32    `json:"replicas,omitempty"`
 	Deployed bool      `json:"deployed"`
+	Image    string    `json:"image,omitempty"`
 }
 
 // Status is the body of GET /status.
@@ -57,4 +62,8 @@ type Status struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
 	Uptime  string `json:"uptime"`
+
+	// Targets names the configured workloads, sorted, so a client can discover
+	// what exists without a separate call.
+	Targets []string `json:"targets,omitempty"`
 }

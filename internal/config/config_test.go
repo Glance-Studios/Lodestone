@@ -2,33 +2,40 @@ package config
 
 import "testing"
 
+// clearEnv blanks every variable Load reads, so a test never picks up whatever
+// happens to be set in the shell running it.
+func clearEnv(t *testing.T) {
+	t.Helper()
+
+	for _, name := range []string{
+		"LODESTONE_ADDR", "LODESTONE_PORT", "LODESTONE_DATA_DIR",
+		"LODESTONE_TARGETS", "LODESTONE_KUBECONFIG",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
-	t.Setenv("LODESTONE_ADDR", "")
-	t.Setenv("LODESTONE_PORT", "")
-	t.Setenv("LODESTONE_DATA_DIR", "")
-	t.Setenv("LODESTONE_TOKEN", "")
+	clearEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 
-	want := Config{
-		Addr:     "0.0.0.0",
-		Port:     8080,
-		DataDir:  "/var/lib/lodestone",
-		DestPath: "/plugins/app.jar",
-	}
+	want := Config{Addr: "0.0.0.0", Port: 8080, DataDir: "/var/lib/lodestone"}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}
 }
 
 func TestLoadFromEnv(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("LODESTONE_ADDR", "127.0.0.1")
 	t.Setenv("LODESTONE_PORT", "9000")
 	t.Setenv("LODESTONE_DATA_DIR", "/tmp/lodestone")
-	t.Setenv("LODESTONE_TOKEN", "sekret")
+	t.Setenv("LODESTONE_TARGETS", "/etc/lodestone/targets.json")
+	t.Setenv("LODESTONE_KUBECONFIG", "/etc/rancher/k3s/k3s.yaml")
 
 	cfg, err := Load()
 	if err != nil {
@@ -36,49 +43,27 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 
 	want := Config{
-		Addr:     "127.0.0.1",
-		Port:     9000,
-		DataDir:  "/tmp/lodestone",
-		Token:    "sekret",
-		DestPath: "/plugins/app.jar",
+		Addr:        "127.0.0.1",
+		Port:        9000,
+		DataDir:     "/tmp/lodestone",
+		TargetsFile: "/etc/lodestone/targets.json",
+		Kubeconfig:  "/etc/rancher/k3s/k3s.yaml",
 	}
 	if cfg != want {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}
 }
 
-func TestDeployEnabled(t *testing.T) {
-	full := Config{
-		BaseImage:  "ghcr.io/x/paper:1.21",
-		Repo:       "ghcr.io/x/builds",
-		Namespace:  "game",
-		Deployment: "paper-lobby",
-		Container:  "paper",
+// No targets file is a valid state: the agent then serves /status only.
+func TestLoadWithoutTargetsFile(t *testing.T) {
+	clearEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
 	}
-
-	if !full.DeployEnabled() {
-		t.Error("DeployEnabled() = false for a fully configured target")
-	}
-
-	// Every field is required: drop any one and deploying must stay off, so a
-	// half-configured agent never tries to deploy.
-	tests := map[string]func(*Config){
-		"no base image": func(c *Config) { c.BaseImage = "" },
-		"no repo":       func(c *Config) { c.Repo = "" },
-		"no namespace":  func(c *Config) { c.Namespace = "" },
-		"no deployment": func(c *Config) { c.Deployment = "" },
-		"no container":  func(c *Config) { c.Container = "" },
-	}
-
-	for name, drop := range tests {
-		t.Run(name, func(t *testing.T) {
-			cfg := full // a struct copy, so each case starts clean
-			drop(&cfg)
-
-			if cfg.DeployEnabled() {
-				t.Errorf("DeployEnabled() = true with %s", name)
-			}
-		})
+	if cfg.TargetsFile != "" {
+		t.Errorf("TargetsFile = %q, want empty", cfg.TargetsFile)
 	}
 }
 
@@ -95,6 +80,7 @@ func TestLoadRejectsBadPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
 			t.Setenv("LODESTONE_PORT", tt.port)
 
 			if _, err := Load(); err == nil {

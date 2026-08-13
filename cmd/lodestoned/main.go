@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
 	"github.com/Glance-Studios/Lodestone/internal/server"
 	"github.com/Glance-Studios/Lodestone/internal/store"
+	"github.com/Glance-Studios/Lodestone/internal/target"
 )
 
 var version = "dev"
@@ -46,41 +49,35 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if cfg.Token == "" {
-		fmt.Fprintln(os.Stderr, "warning: LODESTONE_TOKEN not set; protected endpoints will reject every request")
-	}
-
 	st, err := store.New(filepath.Join(cfg.DataDir, "artifacts"))
 	if err != nil {
 		return fmt.Errorf("open artifact store: %w", err)
 	}
 
-	led, err := ledger.Open(filepath.Join(cfg.DataDir, "ledger.json"))
-	if err != nil {
-		return fmt.Errorf("open ledger: %w", err)
-	}
+	opts := server.Options{Version: version, Store: st}
 
-	opts := server.Options{
-		Version: version,
-		Token:   cfg.Token,
-		Store:   st,
-		Ledger:  led,
-	}
+	// Targets are optional: with none, the agent serves /status and nothing else,
+	// which is a useful state for a fresh install.
+	if cfg.TargetsFile == "" {
+		fmt.Println("targets: none configured (LODESTONE_TARGETS unset)")
+	} else {
+		targets, err := target.Load(cfg.TargetsFile)
+		if err != nil {
+			return fmt.Errorf("load targets: %w", err)
+		}
 
-	// Deploying is opt-in: without a configured target the agent is still a
-	// useful upload-and-ledger service, and POST /deploy answers 501.
-	if cfg.DeployEnabled() {
-		packager, deployer, err := deployPipeline(cfg)
+		opts.Targets, err = buildTargets(cfg, targets)
 		if err != nil {
 			return err
 		}
-		opts.Packager = packager
-		opts.Deployer = deployer
 
-		fmt.Printf("deploy target: %s/%s container %s\n", cfg.Namespace, cfg.Deployment, cfg.Container)
-		fmt.Printf("packaging:     %s -> %s at %s\n", cfg.BaseImage, cfg.Repo, cfg.DestPath)
-	} else {
-		fmt.Println("deploy target: not configured (POST /deploy disabled)")
+		for _, name := range sortedNames(targets) {
+			t := targets[name]
+			fmt.Printf("target %-16s %s\n", name, t.Describe())
+			fmt.Printf("       %-16s %s -> %s at %s\n", "", t.BaseImage, t.Repo, t.DestPath)
+			fmt.Printf("       %-16s settle %s, max %d replicas\n", "",
+				time.Duration(t.SettleTimeout), t.MaxReplicas)
+		}
 	}
 
 	srv := server.New(opts)
@@ -91,11 +88,79 @@ func run() error {
 	return serve(addr, srv.Handler())
 }
 
+// buildTargets turns validated config into a deploy pipeline per target.
+//
+// One Kubernetes client is shared: it is safe for concurrent use and holds
+// connection pools worth reusing. Everything else is per target, including the
+// ledger, so a token that reaches one target cannot read another's history.
+func buildTargets(cfg config.Config, targets map[string]target.Target) (map[string]server.TargetSpec, error) {
+	clientset, err := k8s.NewClientset(cfg.Kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+
+	out := make(map[string]server.TargetSpec, len(targets))
+
+	for name, t := range targets {
+		led, err := ledger.Open(filepath.Join(cfg.DataDir, "ledger", name+".json"))
+		if err != nil {
+			return nil, fmt.Errorf("open ledger for %s: %w", name, err)
+		}
+
+		dep := k8s.NewDeployment(clientset, t.Namespace, t.Deployment, t.Container)
+
+		rolloutOpts := rollout.Options{
+			Checks:        healthChecks(t),
+			SettleTimeout: time.Duration(t.SettleTimeout),
+		}
+
+		// Bind the target and its options here rather than leaking them into the
+		// HTTP layer. The loop variable is captured per iteration, which is safe
+		// since Go 1.22.
+		deployer := func(ctx context.Context, imageRef string, replicas *int32) <-chan rollout.Event {
+			o := rolloutOpts
+			o.Replicas = replicas
+			return rollout.Deploy(ctx, dep, imageRef, o)
+		}
+
+		out[name] = server.TargetSpec{
+			Config: t,
+			Packager: &image.Packager{
+				Base:     t.BaseImage,
+				Repo:     t.Repo,
+				DestPath: t.DestPath,
+			},
+			Deployer: deployer,
+			Ledger:   led,
+		}
+	}
+
+	return out, nil
+}
+
+// healthChecks builds the gate for one target. Nil when nothing is configured,
+// which rollout treats as "settled is good enough".
+func healthChecks(t target.Target) []health.Check {
+	var checks []health.Check
+
+	if t.HealthURL != "" {
+		checks = append(checks, health.HTTPCheck{URL: t.HealthURL})
+	}
+	if t.HealthAddr != "" {
+		checks = append(checks, health.TCPCheck{Addr: t.HealthAddr})
+	}
+	return checks
+}
+
+func sortedNames(targets map[string]target.Target) []string {
+	return slices.Sorted(maps.Keys(targets))
+}
+
 // shutdownGrace bounds how long a shutdown waits for in-flight requests. A
 // deploy holds its request open for the whole rollout, so this has to exceed a
 // realistic rollout: killing the process mid-rollout is how you end up with a
 // half-deployed cluster and nothing to roll it back.
-const shutdownGrace = 5 * time.Minute
+const shutdownGrace = 15 * time.Minute
 
 // serve runs the HTTP server until a termination signal arrives, then stops
 // accepting connections and waits for in-flight requests to finish.
@@ -140,45 +205,4 @@ func serve(addr string, handler http.Handler) error {
 		fmt.Println("stopped cleanly")
 		return nil
 	}
-}
-
-// deployPipeline builds the packager and the rollout driver from config.
-func deployPipeline(cfg config.Config) (server.Packager, server.Deployer, error) {
-	clientset, err := k8s.NewClientset(cfg.Kubeconfig)
-	if err != nil {
-		return nil, nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-
-	target := k8s.NewDeployment(clientset, cfg.Namespace, cfg.Deployment, cfg.Container)
-
-	packager := &image.Packager{
-		Base:     cfg.BaseImage,
-		Repo:     cfg.Repo,
-		DestPath: cfg.DestPath,
-	}
-
-	rolloutOpts := rollout.Options{Checks: healthChecks(cfg)}
-
-	// A closure adapts rollout.Deploy to the narrow Deployer signature the
-	// server wants, binding the target and options here rather than leaking
-	// them into the HTTP layer.
-	deployer := func(ctx context.Context, imageRef string) <-chan rollout.Event {
-		return rollout.Deploy(ctx, target, imageRef, rolloutOpts)
-	}
-
-	return packager, deployer, nil
-}
-
-// healthChecks builds the gate from config. Returns nil when nothing is
-// configured, which rollout treats as "settled is good enough".
-func healthChecks(cfg config.Config) []health.Check {
-	var checks []health.Check
-
-	if cfg.HealthURL != "" {
-		checks = append(checks, health.HTTPCheck{URL: cfg.HealthURL})
-	}
-	if cfg.HealthAddr != "" {
-		checks = append(checks, health.TCPCheck{Addr: cfg.HealthAddr})
-	}
-	return checks
 }

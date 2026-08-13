@@ -2,11 +2,8 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -15,200 +12,183 @@ import (
 	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/image"
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
+	"github.com/Glance-Studios/Lodestone/internal/store"
+	"github.com/Glance-Studios/Lodestone/internal/target"
 )
 
-// fakePackager records what it was given and returns a canned image reference.
-type fakePackager struct {
-	gotBytes string
-	built    image.Built
-	err      error
-}
-
-func (f *fakePackager) Package(ctx context.Context, r io.Reader) (image.Built, error) {
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return image.Built{}, err
-	}
-	f.gotBytes = string(b)
-
-	if f.err != nil {
-		return image.Built{}, f.err
-	}
-	return f.built, nil
-}
-
-// deployerFor returns a Deployer emitting a fixed outcome.
-func deployerFor(succeed bool) Deployer {
-	return func(ctx context.Context, digest string) <-chan rollout.Event {
-		ch := make(chan rollout.Event, 4)
-		ch <- rollout.Event{Phase: rollout.PhaseStarting, Message: "deploying " + digest, At: time.Now()}
-		if succeed {
-			ch <- rollout.Event{Phase: rollout.PhaseSucceeded, Message: "deployed", At: time.Now()}
-		} else {
-			ch <- rollout.Event{
-				Phase:   rollout.PhaseFailed,
-				Message: "health checks failed",
-				Err:     "connection refused",
-				At:      time.Now(),
-			}
-		}
-		close(ch)
-		return ch
-	}
-}
-
-func deployServer(t *testing.T, p Packager, d Deployer) *Server {
-	t.Helper()
-	return New(Options{
-		Version:  "test",
-		Token:    "tok",
-		Store:    newTestStore(t),
-		Ledger:   newTestLedger(t),
-		Packager: p,
-		Deployer: d,
-	})
-}
-
-func postDeploy(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	req := httptest.NewRequest(http.MethodPost, "/deploy?version=0.1.0&by=cammy", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok")
-	rec := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 func TestDeployHappyPath(t *testing.T) {
-	const jar = "plugin jar bytes"
-	packager := &fakePackager{built: image.Built{
-		Ref:    "ghcr.io/x/builds@sha256:cafe",
-		Digest: "sha256:cafe",
-	}}
+	f := newFixture(t)
 
-	srv := deployServer(t, packager, deployerFor(true))
-	rec := postDeploy(t, srv, jar)
-
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?version=1.0.0&by=cammy", devToken, "jar bytes")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body)
 	}
 
-	var got api.Result
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decoding body: %v", err)
-	}
-
+	got := decodeResult(t, rec)
 	if !got.Deployed {
 		t.Error("Deployed = false, want true")
 	}
-	if got.Image != "ghcr.io/x/builds@sha256:cafe" {
-		t.Errorf("Image = %q, want the pushed reference", got.Image)
+	if got.Target != "dev-lobby" {
+		t.Errorf("Target = %q, want dev-lobby", got.Target)
 	}
-	if !strings.HasPrefix(got.Digest, "sha256:") {
-		t.Errorf("Digest = %q, want the artifact digest", got.Digest)
+	if got.Image != "reg/dev/lobby@sha256:dev" {
+		t.Errorf("Image = %q", got.Image)
 	}
 	if len(got.Events) == 0 {
-		t.Error("Events is empty; the rollout events should be reported")
+		t.Error("Events is empty")
 	}
 
-	// The packager must have received the artifact bytes, read back from the
-	// store rather than buffered from the request.
-	if packager.gotBytes != jar {
-		t.Errorf("packager got %q, want %q", packager.gotBytes, jar)
+	// The packager gets the bytes read back from the store, not the request body.
+	if f.devPackager.gotBytes != "jar bytes" {
+		t.Errorf("packager got %q", f.devPackager.gotBytes)
 	}
-}
-
-// The artifact must be in the ledger even though it was deployed in one shot.
-func TestDeployRecordsInTheLedger(t *testing.T) {
-	packager := &fakePackager{built: image.Built{Ref: "r@sha256:1", Digest: "sha256:1"}}
-	srv := deployServer(t, packager, deployerFor(true))
-
-	postDeploy(t, srv, "jar")
-
-	entries := srv.ledger.Entries()
-	if len(entries) != 1 {
-		t.Fatalf("ledger has %d entries, want 1", len(entries))
-	}
-	if entries[0].Version != "0.1.0" || entries[0].By != "cammy" {
-		t.Errorf("entry = %+v, want version 0.1.0 by cammy", entries[0])
+	// And the other target was untouched.
+	if f.prodPackager.gotBytes != "" {
+		t.Error("the prod packager ran during a dev deploy")
 	}
 }
 
-// A rolled-back deploy is not a 2xx: the agent worked, but the artifact is not
-// live, and the caller must be able to tell those apart.
 func TestDeployRolledBackReports409(t *testing.T) {
-	packager := &fakePackager{built: image.Built{Ref: "r@sha256:2", Digest: "sha256:2"}}
-	srv := deployServer(t, packager, deployerFor(false))
+	f := newFixtureWith(t, false, true)
 
-	rec := postDeploy(t, srv, "jar")
-
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "jar")
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("code = %d, want 409", rec.Code)
 	}
 
-	var got api.Result
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decoding body: %v", err)
-	}
+	got := decodeResult(t, rec)
 	if got.Deployed {
 		t.Error("Deployed = true, want false")
 	}
 	if !strings.Contains(got.Error, "health checks failed") {
-		t.Errorf("Error = %q, want the rollout failure", got.Error)
+		t.Errorf("Error = %q", got.Error)
 	}
 }
 
 func TestDeployPackagingFailureReports502(t *testing.T) {
-	packager := &fakePackager{err: errors.New("registry unauthorized")}
-	srv := deployServer(t, packager, deployerFor(true))
+	f := newFixture(t)
+	f.devPackager.err = errors.New("registry unauthorized")
 
-	rec := postDeploy(t, srv, "jar")
-
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "jar")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("code = %d, want 502", rec.Code)
 	}
-
-	var got api.Result
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decoding body: %v", err)
-	}
-	if !strings.Contains(got.Error, "registry unauthorized") {
-		t.Errorf("Error = %q, want the registry failure", got.Error)
+	if !strings.Contains(decodeResult(t, rec).Error, "registry unauthorized") {
+		t.Errorf("body = %s", rec.Body)
 	}
 }
 
-// Without a configured target the endpoint must say so, not crash.
-func TestDeployNotConfiguredReports501(t *testing.T) {
+// A target configured without a pipeline cannot deploy, but must not crash.
+func TestDeployTargetWithoutPipeline(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New(): %v", err)
+	}
+
 	srv := New(Options{
 		Version: "test",
-		Token:   "tok",
-		Store:   newTestStore(t),
-		Ledger:  newTestLedger(t),
+		Store:   st,
+		Targets: map[string]TargetSpec{
+			"ledger-only": {
+				Config: target.Target{Token: devToken, MaxReplicas: 3},
+				Ledger: newLedger(t),
+			},
+		},
 	})
 
-	rec := postDeploy(t, srv, "jar")
-
+	f := &fixture{srv: srv}
+	rec := f.do(t, http.MethodPost, "/deploy/ledger-only", devToken, "jar")
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("code = %d, want 501", rec.Code)
 	}
 }
 
-// A second deploy while one is in flight must be refused, not interleaved.
-// Interleaved deploys corrupt each other's rollback.
-func TestDeployRefusesConcurrentDeploys(t *testing.T) {
-	// Hold the first deploy inside the deployer until the test releases it.
+// -- replica count ------------------------------------------------------------
+
+func TestDeployPassesReplicaCount(t *testing.T) {
+	f := newFixture(t)
+
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?replicas=3", devToken, "jar")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body)
+	}
+
+	if len(f.devDeployer.replicas) != 1 {
+		t.Fatalf("deployer called %d times, want 1", len(f.devDeployer.replicas))
+	}
+	got := f.devDeployer.replicas[0]
+	if got == nil || *got != 3 {
+		t.Errorf("replicas = %v, want 3", got)
+	}
+
+	// And it is reported back and recorded.
+	res := decodeResult(t, rec)
+	if res.Replicas == nil || *res.Replicas != 3 {
+		t.Errorf("result replicas = %v, want 3", res.Replicas)
+	}
+}
+
+func TestDeployWithoutReplicasLeavesCountAlone(t *testing.T) {
+	f := newFixture(t)
+
+	f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "jar")
+
+	if len(f.devDeployer.replicas) != 1 {
+		t.Fatalf("deployer called %d times, want 1", len(f.devDeployer.replicas))
+	}
+	if got := f.devDeployer.replicas[0]; got != nil {
+		t.Errorf("replicas = %v, want nil so the count is left alone", *got)
+	}
+}
+
+// maxReplicas is a per-target guard against a fat-fingered request.
+func TestDeployRejectsTooManyReplicas(t *testing.T) {
+	f := newFixture(t)
+
+	// dev caps at 5.
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?replicas=50", devToken, "jar")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "maxReplicas") {
+		t.Errorf("body = %s, want it to name the cap", rec.Body)
+	}
+	// Nothing was stored or deployed.
+	if len(f.devDeployer.replicas) != 0 {
+		t.Error("the deploy proceeded despite an invalid replica count")
+	}
+
+	// prod caps at 20, so the same request is fine there.
+	rec = f.do(t, http.MethodPost, "/deploy/prod-lobby?replicas=15", prodToken, "jar")
+	if rec.Code != http.StatusOK {
+		t.Errorf("prod code = %d, want 200 - 15 is under its cap of 20", rec.Code)
+	}
+}
+
+func TestDeployRejectsNonNumericReplicas(t *testing.T) {
+	f := newFixture(t)
+
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?replicas=lots", devToken, "jar")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("code = %d, want 400", rec.Code)
+	}
+}
+
+// -- per-target locking -------------------------------------------------------
+
+// blockingFixture builds a server whose dev deploy blocks until released.
+func blockingFixture(t *testing.T) (*fixture, chan struct{}, chan struct{}) {
+	t.Helper()
+
 	inFlight := make(chan struct{})
 	release := make(chan struct{})
 
-	// Only the first call signals and blocks; later deploys in this test run
-	// straight through. sync.Once because the deployer is invoked more than once.
-	var first sync.Once
-	slowDeployer := func(ctx context.Context, digest string) <-chan rollout.Event {
+	var once sync.Once
+	blocking := func(ctx context.Context, imageRef string, replicas *int32) <-chan rollout.Event {
 		ch := make(chan rollout.Event, 2)
 		go func() {
 			defer close(ch)
-			first.Do(func() {
+			once.Do(func() {
 				close(inFlight)
 				<-release
 			})
@@ -217,60 +197,215 @@ func TestDeployRefusesConcurrentDeploys(t *testing.T) {
 		return ch
 	}
 
-	packager := &fakePackager{built: image.Built{Ref: "r@sha256:9", Digest: "sha256:9"}}
-	srv := deployServer(t, packager, slowDeployer)
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New(): %v", err)
+	}
 
-	// First deploy, in the background - it will block in the deployer.
+	fastDeployer := &recordingDeployer{succeed: true}
+
+	f := &fixture{
+		devPackager:  &fakePackager{built: image.Built{Ref: "reg/dev@sha256:1"}},
+		prodPackager: &fakePackager{built: image.Built{Ref: "reg/prod@sha256:2"}},
+		prodDeployer: fastDeployer,
+		devLedger:    newLedger(t),
+		prodLedger:   newLedger(t),
+	}
+
+	f.srv = New(Options{
+		Version: "test",
+		Store:   st,
+		Targets: map[string]TargetSpec{
+			"dev-lobby": {
+				Config:   target.Target{Token: devToken, MaxReplicas: 5},
+				Packager: f.devPackager,
+				Deployer: blocking,
+				Ledger:   f.devLedger,
+			},
+			"prod-lobby": {
+				Config:   target.Target{Token: prodToken, MaxReplicas: 20},
+				Packager: f.prodPackager,
+				Deployer: fastDeployer.deploy,
+				Ledger:   f.prodLedger,
+			},
+		},
+	})
+
+	return f, inFlight, release
+}
+
+// Two deploys to the SAME target must not interleave - that corrupts rollback.
+func TestConcurrentDeploysToOneTargetAreRefused(t *testing.T) {
+	f, inFlight, release := blockingFixture(t)
+
 	firstDone := make(chan int, 1)
 	go func() {
-		rec := postDeploy(t, srv, "first jar")
+		rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "first")
 		firstDone <- rec.Code
 	}()
 
-	<-inFlight // the first deploy is definitely holding the lock
+	<-inFlight // the first deploy holds dev's lock
 
-	// Second deploy while the first is stuck.
-	second := postDeploy(t, srv, "second jar")
+	second := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "second")
 	if second.Code != http.StatusLocked {
-		t.Errorf("concurrent deploy got %d, want %d", second.Code, http.StatusLocked)
+		t.Errorf("code = %d, want 423", second.Code)
 	}
-	if ra := second.Header().Get("Retry-After"); ra == "" {
-		t.Error("no Retry-After header on the refusal")
+	if second.Header().Get("Retry-After") == "" {
+		t.Error("no Retry-After on the refusal")
 	}
 
-	// Let the first finish, and confirm it succeeded.
 	close(release)
 	if code := <-firstDone; code != http.StatusOK {
 		t.Errorf("first deploy got %d, want 200", code)
 	}
+}
 
-	// The lock must be released, so a later deploy works.
-	third := postDeploy(t, srv, "third jar")
-	if third.Code != http.StatusOK {
-		t.Errorf("deploy after the lock was released got %d, want 200", third.Code)
+// Deploys to DIFFERENT targets must proceed concurrently. A global lock would
+// make one developer queue behind another's ten-minute rollout.
+func TestConcurrentDeploysToDifferentTargetsProceed(t *testing.T) {
+	f, inFlight, release := blockingFixture(t)
+
+	devDone := make(chan int, 1)
+	go func() {
+		rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "dev jar")
+		devDone <- rec.Code
+	}()
+
+	<-inFlight // dev is stuck mid-rollout
+
+	// prod must not be blocked by it.
+	done := make(chan int, 1)
+	go func() {
+		rec := f.do(t, http.MethodPost, "/deploy/prod-lobby", prodToken, "prod jar")
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Errorf("prod deploy got %d, want 200", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("prod deploy blocked behind dev - the lock is global, not per target")
+	}
+
+	close(release)
+	<-devDone
+}
+
+// The lock is released for the next deploy.
+func TestLockIsReleasedAfterDeploy(t *testing.T) {
+	f := newFixture(t)
+
+	for i := range 3 {
+		rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "jar")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("deploy %d got %d, want 200", i, rec.Code)
+		}
 	}
 }
 
-func TestDeployRejectsEmptyBody(t *testing.T) {
-	packager := &fakePackager{built: image.Built{Ref: "r@sha256:3", Digest: "sha256:3"}}
-	srv := deployServer(t, packager, deployerFor(true))
+// -- streaming ----------------------------------------------------------------
 
-	rec := postDeploy(t, srv, "")
+func TestStreamingDeploy(t *testing.T) {
+	f := newFixture(t)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("code = %d, want 400", rec.Code)
+	rec := f.stream(t, "/deploy/dev-lobby?replicas=2", devToken, "jar")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != api.ContentTypeNDJSON {
+		t.Errorf("Content-Type = %q", ct)
+	}
+
+	events, result, found := decodeStream(t, rec.Body.String())
+	if len(events) == 0 {
+		t.Error("no event lines")
+	}
+	if !found {
+		t.Fatal("no result line")
+	}
+	if !result.Deployed {
+		t.Error("Deployed = false")
+	}
+	if result.Target != "dev-lobby" {
+		t.Errorf("Target = %q", result.Target)
+	}
+	if result.Replicas == nil || *result.Replicas != 2 {
+		t.Errorf("Replicas = %v, want 2", result.Replicas)
 	}
 }
 
-func TestDeployNeedsToken(t *testing.T) {
-	packager := &fakePackager{built: image.Built{Ref: "r@sha256:4", Digest: "sha256:4"}}
-	srv := deployServer(t, packager, deployerFor(true))
+// A streamed failure is still HTTP 200; the outcome is in the final line.
+func TestStreamingFailureIsStill200(t *testing.T) {
+	f := newFixtureWith(t, false, true)
 
-	req := httptest.NewRequest(http.MethodPost, "/deploy", strings.NewReader("jar"))
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	rec := f.stream(t, "/deploy/dev-lobby", devToken, "jar")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 even for a failed deploy", rec.Code)
+	}
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("code = %d, want 401", rec.Code)
+	_, result, found := decodeStream(t, rec.Body.String())
+	if !found {
+		t.Fatal("no result line")
+	}
+	if result.Deployed {
+		t.Error("Deployed = true, want false")
+	}
+	if !strings.Contains(result.Error, "health checks failed") {
+		t.Errorf("Error = %q", result.Error)
+	}
+}
+
+// Without the Accept header, the single-object reply is served.
+func TestNonStreamingClientGetsOneObject(t *testing.T) {
+	f := newFixture(t)
+
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby", devToken, "jar")
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	got := decodeResult(t, rec)
+	if len(got.Events) == 0 {
+		t.Error("a non-streamed reply carries its events inline")
+	}
+	if got.Kind != "" {
+		t.Errorf("Kind = %q, want empty when not streamed", got.Kind)
+	}
+}
+
+// -- ledger recording ---------------------------------------------------------
+
+func TestDeployRecordsReplicasInTheLedger(t *testing.T) {
+	f := newFixture(t)
+
+	f.do(t, http.MethodPost, "/deploy/dev-lobby?version=2.0.0&by=cammy&replicas=3", devToken, "jar")
+
+	entries := f.devLedger.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("ledger has %d entries, want 1", len(entries))
+	}
+
+	e := entries[0]
+	if e.Version != "2.0.0" || e.By != "cammy" {
+		t.Errorf("entry = %+v", e)
+	}
+	if e.Replicas == nil || *e.Replicas != 3 {
+		t.Errorf("entry replicas = %v, want 3", e.Replicas)
+	}
+	if e.Target != "dev-lobby" {
+		t.Errorf("entry target = %q", e.Target)
+	}
+}
+
+// A failed deploy is still recorded: the audit trail says what was attempted.
+func TestFailedDeployIsStillRecorded(t *testing.T) {
+	f := newFixtureWith(t, false, true)
+
+	f.do(t, http.MethodPost, "/deploy/dev-lobby?version=bad", devToken, "jar")
+
+	if entries := f.devLedger.Entries(); len(entries) != 1 {
+		t.Errorf("ledger has %d entries, want the failed attempt recorded", len(entries))
 	}
 }

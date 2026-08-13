@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/image"
 	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
+	"github.com/Glance-Studios/Lodestone/internal/store"
 )
 
 // Packager turns an artifact into a pushed image. Declared here, by the
@@ -20,61 +23,46 @@ type Packager interface {
 	Package(ctx context.Context, r io.Reader) (image.Built, error)
 }
 
-// Deployer runs a health-gated rollout. rollout.Deploy satisfies this as a
-// function value, which is why the field is a func rather than an interface.
-type Deployer func(ctx context.Context, digest string) <-chan rollout.Event
+// Deployer runs a health-gated rollout. Replicas is nil to leave the count alone.
+type Deployer func(ctx context.Context, imageRef string, replicas *int32) <-chan rollout.Event
+
+// handleUpload stores and records an artifact without deploying it.
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, t *targetState) {
+	art, ok := s.receive(w, r, t, nil)
+	if !ok {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(api.Artifact{Digest: art.Digest, Size: art.Size})
+}
 
 // handleDeploy accepts an artifact, packages it into an image, pushes it, and
-// rolls the target Deployment onto it - the whole pipeline in one request.
-//
-// Only one deploy runs at a time. Interleaved deploys to one Deployment corrupt
-// each other: if A replaces X with B, then C replaces B with D, and A's rollout
-// then fails, A rolls back to X - silently destroying C's healthy deploy. The
-// rollback is correct in isolation and wrong in company, so the fix is to refuse
-// the overlap rather than to reason about it.
-func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
-	if s.packager == nil || s.deployer == nil {
-		http.Error(w, "deploying is not configured", http.StatusNotImplemented)
+// rolls the target onto it - the whole pipeline in one request.
+func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetState) {
+	if t.Packager == nil || t.Deployer == nil {
+		http.Error(w, "this target cannot deploy", http.StatusNotImplemented)
 		return
 	}
 
-	// TryLock rather than Lock: a caller learns immediately that a deploy is in
-	// flight instead of hanging for minutes behind one.
-	if !s.deployMu.TryLock() {
-		w.Header().Set("Retry-After", "30")
-		http.Error(w, "a deploy is already in progress", http.StatusLocked)
-		return
-	}
-	defer s.deployMu.Unlock()
-
-	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	defer body.Close()
-
-	// Store first: the artifact is recorded and durable before anything is
-	// pushed anywhere, so a failed deploy still leaves an auditable upload.
-	art, err := s.store.Put(body)
+	replicas, err := requestedReplicas(r, t)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "artifact too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "storing artifact failed", http.StatusInternalServerError)
-		return
-	}
-	if art.Size == 0 {
-		http.Error(w, "empty artifact", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	entry := ledger.Entry{
-		Digest:  art.Digest,
-		Size:    art.Size,
-		Version: r.URL.Query().Get("version"),
-		By:      r.URL.Query().Get("by"),
+	// Serialise per target, not globally. TryLock rather than Lock so a caller
+	// learns immediately instead of hanging behind a ten-minute rollout.
+	if !t.mu.TryLock() {
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "a deploy to this target is already in progress", http.StatusLocked)
+		return
 	}
-	if err := s.ledger.Append(entry); err != nil {
-		http.Error(w, "recording artifact failed", http.StatusInternalServerError)
+	defer t.mu.Unlock()
+
+	art, ok := s.receive(w, r, t, replicas)
+	if !ok {
 		return
 	}
 
@@ -86,28 +74,32 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	// Everything above can still use a real status code, because no byte of the
-	// body has been written yet.
-	built, err := s.packager.Package(r.Context(), f)
+	// Everything up to here can still use a real status code, because no byte of
+	// the body has been written yet.
+	built, err := t.Packager.Package(r.Context(), f)
 	if err != nil {
 		writeResult(w, http.StatusBadGateway, api.Result{
+			Target: r.PathValue("target"),
 			Digest: art.Digest,
 			Error:  "packaging or pushing the image failed: " + err.Error(),
 		})
 		return
 	}
 
-	events := s.deployer(r.Context(), built.Ref)
+	events := t.Deployer(r.Context(), built.Ref, replicas)
+	name := r.PathValue("target")
 
 	if wantsStream(r) {
-		streamDeploy(w, art.Digest, built.Ref, events)
+		streamDeploy(w, name, art.Digest, built.Ref, replicas, events)
 		return
 	}
 
 	res := rollout.Collect(events)
 	out := api.Result{
+		Target:   name,
 		Digest:   art.Digest,
 		Image:    built.Ref,
+		Replicas: replicas,
 		Deployed: res.Succeeded(),
 		Events:   toAPIEvents(res.Events),
 	}
@@ -122,6 +114,64 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, status, out)
 }
 
+// receive stores the request body and records it in the target's ledger. It
+// writes its own error response and reports whether to continue.
+func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState, replicas *int32) (store.Artifact, bool) {
+	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	defer body.Close()
+
+	// Store first: the artifact is durable before anything is pushed anywhere, so
+	// a failed deploy still leaves an auditable upload.
+	art, err := s.store.Put(body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "artifact too large", http.StatusRequestEntityTooLarge)
+			return store.Artifact{}, false
+		}
+		http.Error(w, "storing artifact failed", http.StatusInternalServerError)
+		return store.Artifact{}, false
+	}
+	if art.Size == 0 {
+		http.Error(w, "empty artifact", http.StatusBadRequest)
+		return store.Artifact{}, false
+	}
+
+	entry := ledger.Entry{
+		Digest:   art.Digest,
+		Size:     art.Size,
+		Target:   r.PathValue("target"),
+		Version:  r.URL.Query().Get("version"),
+		By:       r.URL.Query().Get("by"),
+		Replicas: replicas,
+	}
+	if err := t.Ledger.Append(entry); err != nil {
+		http.Error(w, "recording artifact failed", http.StatusInternalServerError)
+		return store.Artifact{}, false
+	}
+
+	return art, true
+}
+
+// requestedReplicas reads ?replicas=N and checks it against the target's cap.
+func requestedReplicas(r *http.Request, t *targetState) (*int32, error) {
+	raw := r.URL.Query().Get("replicas")
+	if raw == "" {
+		return nil, nil // leave the count alone
+	}
+
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("replicas %q: not a number", raw)
+	}
+
+	count := int32(n)
+	if err := t.Config.CheckReplicas(count); err != nil {
+		return nil, err
+	}
+	return &count, nil
+}
+
 // wantsStream reports whether the client asked for a newline-delimited stream.
 func wantsStream(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), api.ContentTypeNDJSON)
@@ -133,7 +183,7 @@ func wantsStream(r *http.Request) bool {
 // It always responds 200. A status code is sent with the first byte of the body
 // and cannot be revised afterwards, so a streamed deploy cannot report failure
 // that way - the caller reads the final line instead.
-func streamDeploy(w http.ResponseWriter, digest, imageRef string, events <-chan rollout.Event) {
+func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas *int32, events <-chan rollout.Event) {
 	w.Header().Set("Content-Type", api.ContentTypeNDJSON)
 	// Ask intermediaries not to buffer; a proxy holding the response defeats the
 	// point of streaming it.
@@ -162,8 +212,10 @@ func streamDeploy(w http.ResponseWriter, digest, imageRef string, events <-chan 
 
 	final := api.Result{
 		Kind:     api.KindResult,
+		Target:   name,
 		Digest:   digest,
 		Image:    imageRef,
+		Replicas: replicas,
 		Deployed: res.Succeeded(),
 	}
 	if !res.Succeeded() {

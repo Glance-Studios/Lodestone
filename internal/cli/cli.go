@@ -31,32 +31,60 @@ type Command struct {
 
 // Globals are the flags accepted by every command.
 type Globals struct {
-	Ctx   string // --ctx: named context to use
-	API   string // --api: override the address
-	Token string // --token: override the token
-	JSON  bool   // --json: machine-readable output
+	Ctx    string // --ctx: named context to use
+	API    string // --api: override the address
+	Token  string // --token: override the token
+	Target string // --target: which workload to address
+	JSON   bool   // --json: machine-readable output
+
+	// Replicas is -1 when unset, because 0 is a meaningful count (scale to
+	// nothing) and a bare int cannot distinguish the two.
+	Replicas int
 }
 
-// client resolves a context and returns a client for it. Explicit --api/--token
-// win over anything stored, so a one-off call needs no config change.
-func (g Globals) client() (*Client, string, error) {
+// replicas returns the requested count, or nil when none was asked for.
+func (g Globals) replicas() *int32 {
+	if g.Replicas < 0 {
+		return nil
+	}
+	n := int32(g.Replicas)
+	return &n
+}
+
+// target resolves which workload to address: the flag wins, then the context's
+// default target.
+func (g Globals) target(ctx Context) (string, error) {
+	if g.Target != "" {
+		return g.Target, nil
+	}
+	if ctx.Target != "" {
+		return ctx.Target, nil
+	}
+	return "", fmt.Errorf("no target given: pass --target, or set one with `lodestone login`")
+}
+
+// client resolves a context and returns a client for it, plus the context's
+// name and the resolved context itself. Explicit --api/--token win over anything
+// stored, so a one-off call needs no config change.
+func (g Globals) client() (*Client, string, Context, error) {
 	if g.API != "" {
-		return NewClient(Context{API: g.API, Token: g.Token}), "flags", nil
+		c := Context{API: g.API, Token: g.Token, Target: g.Target}
+		return NewClient(c), "flags", c, nil
 	}
 
 	cfg, err := LoadConfig()
 	if err != nil {
-		return nil, "", err
+		return nil, "", Context{}, err
 	}
 
 	ctx, name, err := cfg.Resolve(g.Ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", Context{}, err
 	}
 	if g.Token != "" {
 		ctx.Token = g.Token
 	}
-	return NewClient(ctx), name, nil
+	return NewClient(ctx), name, ctx, nil
 }
 
 // ExitCode is an error carrying a specific process exit status. Commands return
@@ -82,7 +110,9 @@ const (
 // Run parses args (without the program name) and runs the requested command.
 // It returns the process exit code.
 func Run(ctx context.Context, env Env, args []string) int {
-	var g Globals
+	// Replicas starts at -1 to mean "not asked for", because 0 is a meaningful
+	// count and a bare int cannot distinguish the two.
+	g := Globals{Replicas: -1}
 
 	// The global flag set also owns -h/--help for the top level.
 	fs := flag.NewFlagSet("lodestone", flag.ContinueOnError)
@@ -192,6 +222,11 @@ func registerGlobals(fs *flag.FlagSet, g *Globals) {
 	fs.StringVar(&g.Ctx, "ctx", g.Ctx, "named context to use")
 	fs.StringVar(&g.API, "api", g.API, "server address, overriding the context")
 	fs.StringVar(&g.Token, "token", g.Token, "bearer token, overriding the context")
+	fs.StringVar(&g.Target, "target", g.Target, "target to address, overriding the context")
+	// Default carried from g, not a literal: this runs twice - once for the root
+	// flag set and once for the subcommand - and a literal would discard what the
+	// root already parsed.
+	fs.IntVar(&g.Replicas, "replicas", g.Replicas, "scale the target to this many instances")
 	fs.BoolVar(&g.JSON, "json", g.JSON, "machine-readable output")
 }
 

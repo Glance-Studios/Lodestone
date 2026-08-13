@@ -15,12 +15,23 @@ import (
 
 // Entry is one line of the ledger: an artifact that was published.
 type Entry struct {
-	Digest   string    `json:"digest"`
-	Size     int64     `json:"size"`
-	Version  string    `json:"version,omitempty"`
-	By       string    `json:"by,omitempty"`
-	At       time.Time `json:"at"`
-	Deployed bool      `json:"deployed"`
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+
+	// Target names the workload this was published for. Ledgers are per-target,
+	// so this is redundant on disk - it is here so an entry copied out of one
+	// still says what it belongs to.
+	Target string `json:"target,omitempty"`
+
+	Version string    `json:"version,omitempty"`
+	By      string    `json:"by,omitempty"`
+	At      time.Time `json:"at"`
+
+	// Replicas records the count a deploy asked for, when it asked for one.
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	Deployed bool   `json:"deployed"`
+	Image    string `json:"image,omitempty"` // the pushed image, once packaged
 }
 
 // Ledger is an append-only record persisted as a single JSON file. It is safe

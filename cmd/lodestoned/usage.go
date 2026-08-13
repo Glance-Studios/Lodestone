@@ -6,9 +6,8 @@ import (
 	"os"
 )
 
-// usage documents the environment variables, not just the flags - lodestoned is
-// configured entirely through the environment, so a --help that only listed
-// flags would tell the reader almost nothing.
+// usage documents the environment variables and the targets file, not just the
+// flags - lodestoned is configured almost entirely outside its command line.
 func usage() {
 	w := flag.CommandLine.Output()
 
@@ -21,43 +20,57 @@ Flags:
   -version    print the version and exit
   -help       print this message
 
-Configuration is read from the environment.
-
-Server:
+Server settings come from the environment:
   LODESTONE_ADDR         address to listen on            (default 0.0.0.0)
   LODESTONE_PORT         port to listen on               (default 8080)
-  LODESTONE_DATA_DIR     artifacts and ledger live here  (default /var/lib/lodestone)
-  LODESTONE_TOKEN        bearer token for protected endpoints
-                         REQUIRED - unset means every protected request is denied
-
-Deploying (all five required, or POST /deploy answers 501):
-  LODESTONE_BASE_IMAGE   image to append artifacts onto, e.g. ghcr.io/you/paper:1.21
-  LODESTONE_REPO         registry path to push builds to, e.g. ghcr.io/you/builds
-  LODESTONE_NAMESPACE    namespace of the target Deployment
-  LODESTONE_DEPLOYMENT   name of the target Deployment
-  LODESTONE_CONTAINER    container within the Deployment to update
-
-Deploying (optional):
-  LODESTONE_DEST_PATH    where the artifact lands in the image (default /plugins/app.jar)
+  LODESTONE_DATA_DIR     artifacts and ledgers live here (default /var/lib/lodestone)
+  LODESTONE_TARGETS      path to the targets JSON file
   LODESTONE_KUBECONFIG   kubeconfig path; unset means in-cluster, then the usual rules
 
-Health gate (optional; unset means "settled is good enough"):
-  LODESTONE_HEALTH_URL   HTTP GET must return 2xx
-  LODESTONE_HEALTH_ADDR  TCP connect must succeed, as host:port
+Deploy targets come from the file named by LODESTONE_TARGETS, because the
+environment cannot express a map. With no targets file the agent serves /status
+and nothing else.
+
+  {
+    "targets": {
+      "dev-lobby": {
+        "namespace":     "hideaway-dev",
+        "deployment":    "lobby",
+        "container":     "paper",
+        "baseImage":     "localhost:5000/hideaway/paper:26.2-87",
+        "repo":          "localhost:5000/dev/lobby",
+        "destPath":      "/plugins/app.jar",
+        "tokenEnv":      "LODESTONE_TOKEN_DEV_LOBBY",
+        "healthAddr":    "127.0.0.1:25565",
+        "settleTimeout": "12m",
+        "maxReplicas":   5
+      }
+    }
+  }
+
+  namespace, deployment, container, baseImage and repo are required.
+  Use tokenEnv (naming an environment variable) rather than a literal token, so
+  the file can live in a ConfigMap and the secret in a Secret.
+
+  settleTimeout should exceed the Deployment's progressDeadlineSeconds, so that
+  Kubernetes gets to report why a rollout failed before we stop watching.
+  maxReplicas caps what one deploy may scale to.
 
 Endpoints:
-  GET  /status           liveness and version              (public)
-  POST /artifacts        upload an artifact, record it     (token)
-  GET  /artifacts        read the ledger, newest first     (token)
-  POST /deploy           upload, package, push, roll out   (token)
+  GET  /status                      liveness, version, target names   (public)
+  POST /artifacts/{target}          upload and record                 (target token)
+  GET  /artifacts/{target}          that target's ledger              (target token)
+  POST /deploy/{target}             upload, package, push, roll out   (target token)
 
-Both upload endpoints accept ?version= and ?by= to stamp the ledger entry.
+Each target's token reaches only that target. Upload endpoints accept ?version=
+and ?by= to stamp the ledger; /deploy also accepts ?replicas= to scale.
+
+Send "Accept: application/x-ndjson" to /deploy for streamed progress. A streamed
+deploy always returns 200 - read the final result line for the outcome.
 
 Example:
-  LODESTONE_TOKEN=$(openssl rand -hex 32) \
-  LODESTONE_BASE_IMAGE=ghcr.io/you/paper:1.21 \
-  LODESTONE_REPO=ghcr.io/you/builds \
-  LODESTONE_NAMESPACE=game LODESTONE_DEPLOYMENT=lobby LODESTONE_CONTAINER=paper \
+  export LODESTONE_TARGETS=/etc/lodestone/targets.json
+  export LODESTONE_TOKEN_DEV_LOBBY=$(openssl rand -hex 32)
   lodestoned
 `, version)
 

@@ -68,7 +68,7 @@ func TestBusyIsRecognised(t *testing.T) {
 		http.Error(w, "a deploy is already in progress", http.StatusLocked)
 	})
 
-	_, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{}, nil)
+	_, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{}, nil)
 
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -94,7 +94,7 @@ func TestPushSendsMetadataAsQuery(t *testing.T) {
 		fmt.Fprint(w, `{"digest":"sha256:abc","size":3}`)
 	})
 
-	got, err := c.Push(context.Background(), strings.NewReader("jar"),
+	got, err := c.Push(context.Background(), "dev-lobby", strings.NewReader("jar"),
 		UploadOptions{Version: "1.0.0", By: "cammy"})
 	if err != nil {
 		t.Fatalf("Push() error = %v", err)
@@ -143,7 +143,7 @@ func TestDeployStreamsEventsInOrder(t *testing.T) {
 	))
 
 	var phases []string
-	res, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{},
+	res, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{},
 		func(e api.Event) { phases = append(phases, e.Phase) })
 	if err != nil {
 		t.Fatalf("Deploy() error = %v", err)
@@ -174,7 +174,7 @@ func TestDeployFailureComesFromTheResultLine(t *testing.T) {
 		`{"kind":"result","digest":"sha256:abc","deployed":false,"error":"health checks failed: refused"}`,
 	))
 
-	res, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{}, nil)
+	res, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{}, nil)
 	if err != nil {
 		t.Fatalf("Deploy() error = %v, want nil - the request itself succeeded", err)
 	}
@@ -193,7 +193,7 @@ func TestDeployTruncatedStreamIsAnError(t *testing.T) {
 		`{"kind":"event","phase":"settling","message":"waiting","at":"2026-08-13T10:00:00Z"}`,
 	))
 
-	_, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{}, nil)
+	_, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{}, nil)
 	if !errors.Is(err, ErrNoResult) {
 		t.Errorf("Deploy() error = %v, want ErrNoResult", err)
 	}
@@ -208,7 +208,7 @@ func TestDeployIgnoresUnknownLineKinds(t *testing.T) {
 	))
 
 	var count int
-	res, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{},
+	res, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{},
 		func(api.Event) { count++ })
 	if err != nil {
 		t.Fatalf("Deploy() error = %v", err)
@@ -230,7 +230,7 @@ func TestDeployHandlesNonStreamingServer(t *testing.T) {
 	})
 
 	var count int
-	res, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{},
+	res, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{},
 		func(api.Event) { count++ })
 	if err != nil {
 		t.Fatalf("Deploy() error = %v", err)
@@ -270,7 +270,7 @@ func TestDeployDeliversEventsProgressively(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, err := c.Deploy(context.Background(), strings.NewReader("jar"), UploadOptions{},
+		_, err := c.Deploy(context.Background(), "dev-lobby", strings.NewReader("jar"), UploadOptions{},
 			func(api.Event) {
 				select {
 				case firstEvent <- struct{}{}:

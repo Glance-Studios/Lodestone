@@ -170,13 +170,13 @@ func TestFlagsAfterPositionalArgument(t *testing.T) {
 	defer srv.Close()
 
 	// The flag comes after the filename.
-	got := run(t, "deploy", jar, "--api", srv.URL)
+	got := run(t, "deploy", jar, "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d, want 0 (stderr %q)", got.code, got.err)
 	}
 
 	// And interleaved with it.
-	got = run(t, "deploy", "--json", jar, "--api", srv.URL)
+	got = run(t, "deploy", "--json", jar, "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitOK {
 		t.Errorf("interleaved: code = %d, want 0 (stderr %q)", got.code, got.err)
 	}
@@ -255,7 +255,7 @@ func TestLedgerEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got := run(t, "ledger", "--api", srv.URL)
+	got := run(t, "ledger", "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d", got.code)
 	}
@@ -275,7 +275,7 @@ func TestLedgerTable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got := run(t, "ledger", "--api", srv.URL)
+	got := run(t, "ledger", "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d", got.code)
 	}
@@ -308,7 +308,7 @@ func TestJSONOutputIsParseable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got := run(t, "status", "--api", srv.URL, "--json")
+	got := run(t, "status", "--api", srv.URL, "--target", "dev-lobby", "--json")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d", got.code)
 	}
@@ -360,7 +360,7 @@ func TestDeploySuccess(t *testing.T) {
 	))
 	defer srv.Close()
 
-	got := run(t, "deploy", jar, "--api", srv.URL)
+	got := run(t, "deploy", jar, "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d, want 0 (stderr %q)", got.code, got.err)
 	}
@@ -387,7 +387,7 @@ func TestDeployRolledBackExitsTwo(t *testing.T) {
 	))
 	defer srv.Close()
 
-	got := run(t, "deploy", jar, "--api", srv.URL)
+	got := run(t, "deploy", jar, "--api", srv.URL, "--target", "dev-lobby")
 	if got.code != ExitNotHealthy {
 		t.Fatalf("code = %d, want %d", got.code, ExitNotHealthy)
 	}
@@ -410,7 +410,7 @@ func TestDeployJSONHasNoProgressLines(t *testing.T) {
 	))
 	defer srv.Close()
 
-	got := run(t, "deploy", jar, "--api", srv.URL, "--json")
+	got := run(t, "deploy", jar, "--api", srv.URL, "--target", "dev-lobby", "--json")
 	if got.code != ExitOK {
 		t.Fatalf("code = %d, stderr %q", got.code, got.err)
 	}
@@ -427,7 +427,7 @@ func TestDeployJSONHasNoProgressLines(t *testing.T) {
 func TestDeployMissingFile(t *testing.T) {
 	isolate(t)
 
-	got := run(t, "deploy", filepath.Join(t.TempDir(), "nope.jar"), "--api", "http://127.0.0.1:1")
+	got := run(t, "deploy", filepath.Join(t.TempDir(), "nope.jar"), "--api", "http://127.0.0.1:1", "--target", "dev-lobby")
 	if got.code != ExitError {
 		t.Errorf("code = %d, want %d", got.code, ExitError)
 	}
@@ -453,7 +453,7 @@ func TestPushStampsMetadata(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if got := run(t, "push", jar, "--api", srv.URL); got.code != ExitOK {
+	if got := run(t, "push", jar, "--api", srv.URL, "--target", "dev-lobby"); got.code != ExitOK {
 		t.Fatalf("code = %d, stderr %q", got.code, got.err)
 	}
 	if gotVersion != "4.5.6" || gotBy != "ci-runner" {
@@ -497,7 +497,7 @@ func TestActionableErrors(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got := run(t, append(tt.args, "--api", srv.URL)...)
+			got := run(t, append(tt.args, "--api", srv.URL, "--target", "dev-lobby")...)
 			if got.code != ExitError {
 				t.Errorf("code = %d, want %d", got.code, ExitError)
 			}

@@ -14,9 +14,14 @@ import (
 )
 
 // Context is one server the CLI can talk to.
+//
+// Tokens are per target on the server, so a context pairs an address with one
+// token and the target that token reaches. Addressing a second target means a
+// second context.
 type Context struct {
-	API   string `json:"api"`   // base URL, e.g. http://127.0.0.1:8080
-	Token string `json:"token"` // bearer token
+	API    string `json:"api"`              // base URL, e.g. http://127.0.0.1:8080
+	Token  string `json:"token"`            // bearer token, scoped to Target
+	Target string `json:"target,omitempty"` // default target for this context
 }
 
 // Config is the on-disk configuration: named contexts plus which one is default.
@@ -137,7 +142,11 @@ func (c *Config) Set(name string, ctx Context) {
 // The returned name is for display ("env" for case 1).
 func (c *Config) Resolve(name string) (Context, string, error) {
 	if api := os.Getenv("LODESTONE_API"); api != "" {
-		return Context{API: api, Token: os.Getenv("LODESTONE_TOKEN")}, "env", nil
+		return Context{
+			API:    api,
+			Token:  os.Getenv("LODESTONE_TOKEN"),
+			Target: os.Getenv("LODESTONE_TARGET"),
+		}, "env", nil
 	}
 
 	if name == "" {

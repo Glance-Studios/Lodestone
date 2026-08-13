@@ -2,58 +2,74 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/store"
+	"github.com/Glance-Studios/Lodestone/internal/target"
 )
 
 // maxUploadBytes caps an artifact upload. Paper plugin jars are single-digit MB;
 // 256 MiB is generous and still bounds what one request can cost us.
 const maxUploadBytes = 256 << 20
 
-// Server holds the API's deps & state
+// TargetSpec is everything the server needs to serve one target. Built by main,
+// which owns the Kubernetes client and the registry credentials.
+type TargetSpec struct {
+	Config   target.Target
+	Packager Packager
+	Deployer Deployer
+	Ledger   *ledger.Ledger
+}
+
+// targetState adds the server's own per-target state to a spec.
+type targetState struct {
+	TargetSpec
+
+	// mu serialises deploys to this target and only this target. Interleaved
+	// deploys to one Deployment corrupt each other's rollback; deploys to
+	// different Deployments have no reason to wait for one another, and a global
+	// lock would make one developer queue behind another's ten-minute rollout.
+	mu sync.Mutex
+}
+
+// Server holds the API's deps & state.
 type Server struct {
 	version string
-	token   string
 	store   *store.Store
-	ledger  *ledger.Ledger
 	started time.Time
 
-	// Both nil unless deploying is configured; POST /deploy 501s without them.
-	packager Packager
-	deployer Deployer
-
-	// deployMu serialises deploys. Held for a whole deploy, so it is taken with
-	// TryLock and a second caller is refused rather than queued.
-	deployMu sync.Mutex
+	// targets is fixed at construction: Lodestone addresses targets, it does not
+	// create or destroy them. Nothing mutates this map, so it needs no lock.
+	targets map[string]*targetState
 }
 
-// Options are Server's dependencies. A struct rather than more positional
-// arguments, because five of them was already one too many.
+// Options are Server's dependencies.
 type Options struct {
-	Version  string
-	Token    string
-	Store    *store.Store
-	Ledger   *ledger.Ledger
-	Packager Packager // optional
-	Deployer Deployer // optional
+	Version string
+	Store   *store.Store
+
+	// Targets keyed by name. Empty is allowed - the agent then serves /status
+	// and nothing else, which is a useful state for a fresh install.
+	Targets map[string]TargetSpec
 }
 
-// New returns a Server. Deploying is enabled only when both Packager and
-// Deployer are supplied.
+// New returns a Server.
 func New(opts Options) *Server {
+	targets := make(map[string]*targetState, len(opts.Targets))
+	for name, spec := range opts.Targets {
+		targets[name] = &targetState{TargetSpec: spec}
+	}
+
 	return &Server{
-		version:  opts.Version,
-		token:    opts.Token,
-		store:    opts.Store,
-		ledger:   opts.Ledger,
-		packager: opts.Packager,
-		deployer: opts.Deployer,
-		started:  time.Now(),
+		version: opts.Version,
+		store:   opts.Store,
+		targets: targets,
+		started: time.Now(),
 	}
 }
 
@@ -63,86 +79,60 @@ func (s *Server) Handler() http.Handler {
 	// Public: health probes need to reach this without a token.
 	mux.HandleFunc("GET /status", s.handleStatus)
 
-	// Protected: wrapped in the auth middleware.
-	requireToken := RequireToken(s.token)
-	mux.Handle("POST /artifacts", requireToken(http.HandlerFunc(s.handleArtifacts)))
-	mux.Handle("GET /artifacts", requireToken(http.HandlerFunc(s.handleListArtifacts)))
-	mux.Handle("POST /deploy", requireToken(http.HandlerFunc(s.handleDeploy)))
+	// Everything else is addressed by target and guarded by that target's token.
+	// {target} is a Go 1.22 path wildcard, read back with r.PathValue.
+	mux.Handle("POST /deploy/{target}", s.requireTargetToken(s.handleDeploy))
+	mux.Handle("POST /artifacts/{target}", s.requireTargetToken(s.handleUpload))
+	mux.Handle("GET /artifacts/{target}", s.requireTargetToken(s.handleListArtifacts))
 
 	return mux
 }
 
-// handleListArtifacts returns the ledger, newest first.
-func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
-	entries := s.ledger.Entries()
-	if entries == nil {
-		// Marshal nil as [] rather than null - the nil-vs-empty-slice trap.
-		entries = []ledger.Entry{}
+// TargetNames returns the configured target names, sorted. For logging.
+func (s *Server) TargetNames() []string {
+	out := make([]string, 0, len(s.targets))
+	for name := range s.targets {
+		out = append(out, name)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(entries); err != nil {
-		return
-	}
+	slices.Sort(out)
+	return out
 }
 
-// handleArtifacts accepts an uploaded artifact, stores it by content digest and
-// reports what was stored.
-func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
-	// Bound the request before reading a byte of it, so an oversized upload
-	// costs us the limit rather than the whole body.
-	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	defer body.Close()
+// handleListArtifacts returns one target's ledger, newest first.
+func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request, t *targetState) {
+	entries := t.Ledger.Entries()
 
-	art, err := s.store.Put(body)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "artifact too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "storing artifact failed", http.StatusInternalServerError)
-		return
+	out := make([]api.LedgerEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, api.LedgerEntry{
+			Digest:   e.Digest,
+			Size:     e.Size,
+			Target:   e.Target,
+			Version:  e.Version,
+			By:       e.By,
+			At:       e.At,
+			Replicas: e.Replicas,
+			Deployed: e.Deployed,
+			Image:    e.Image,
+		})
 	}
 
-	if art.Size == 0 {
-		http.Error(w, "empty artifact", http.StatusBadRequest)
-		return
-	}
-
-	// Record it. The artifact bytes are already safe on disk, so a ledger
-	// failure means we have an artifact we cannot account for - report it
-	// rather than pretending the upload succeeded.
-	entry := ledger.Entry{
-		Digest:  art.Digest,
-		Size:    art.Size,
-		Version: r.URL.Query().Get("version"),
-		By:      r.URL.Query().Get("by"),
-	}
-	if err := s.ledger.Append(entry); err != nil {
-		http.Error(w, "recording artifact failed", http.StatusInternalServerError)
-		return
-	}
-
+	// A nil slice marshals to null; an empty one to [], which is what a client
+	// iterating the response needs.
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(art); err != nil {
-		return // response already begun; nothing useful left to say
+	if err := json.NewEncoder(w).Encode(out); err != nil {
+		return
 	}
-}
-
-// Status is the JSON body returned by GET /status
-type Status struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
-	Uptime  string `json:"uptime"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	body := Status{
+	// api.Status, not a local copy: one definition means the CLI cannot drift
+	// from what the server actually sends.
+	body := api.Status{
 		Status:  "ok",
 		Version: s.version,
 		Uptime:  time.Since(s.started).Round(time.Second).String(),
+		Targets: s.TargetNames(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
