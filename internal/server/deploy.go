@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/image"
 	"github.com/Glance-Studios/Lodestone/internal/ledger"
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
@@ -21,15 +23,6 @@ type Packager interface {
 // Deployer runs a health-gated rollout. rollout.Deploy satisfies this as a
 // function value, which is why the field is a func rather than an interface.
 type Deployer func(ctx context.Context, digest string) <-chan rollout.Event
-
-// DeployResponse is the JSON body returned by POST /deploy.
-type DeployResponse struct {
-	Digest   string          `json:"digest"`   // the artifact's sha256
-	Image    string          `json:"image"`    // the pushed image reference
-	Deployed bool            `json:"deployed"` // did the rollout succeed
-	Events   []rollout.Event `json:"events"`
-	Error    string          `json:"error,omitempty"`
-}
 
 // handleDeploy accepts an artifact, packages it into an image, pushes it, and
 // rolls the target Deployment onto it - the whole pipeline in one request.
@@ -93,23 +86,32 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	// Everything above can still use a real status code, because no byte of the
+	// body has been written yet.
 	built, err := s.packager.Package(r.Context(), f)
 	if err != nil {
-		writeDeployResult(w, http.StatusBadGateway, DeployResponse{
+		writeResult(w, http.StatusBadGateway, api.Result{
 			Digest: art.Digest,
 			Error:  "packaging or pushing the image failed: " + err.Error(),
 		})
 		return
 	}
 
-	res := rollout.Collect(s.deployer(r.Context(), built.Ref))
+	events := s.deployer(r.Context(), built.Ref)
 
-	out := DeployResponse{
+	if wantsStream(r) {
+		streamDeploy(w, art.Digest, built.Ref, events)
+		return
+	}
+
+	res := rollout.Collect(events)
+	out := api.Result{
 		Digest:   art.Digest,
 		Image:    built.Ref,
 		Deployed: res.Succeeded(),
-		Events:   res.Events,
+		Events:   toAPIEvents(res.Events),
 	}
+
 	status := http.StatusOK
 	if !res.Succeeded() {
 		out.Error = res.Err.Error()
@@ -117,10 +119,80 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		// correctly, but the caller's artifact is not live - so not a 2xx.
 		status = http.StatusConflict
 	}
-	writeDeployResult(w, status, out)
+	writeResult(w, status, out)
 }
 
-func writeDeployResult(w http.ResponseWriter, status int, body DeployResponse) {
+// wantsStream reports whether the client asked for a newline-delimited stream.
+func wantsStream(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), api.ContentTypeNDJSON)
+}
+
+// streamDeploy writes one JSON object per line as the rollout progresses, then a
+// final result line.
+//
+// It always responds 200. A status code is sent with the first byte of the body
+// and cannot be revised afterwards, so a streamed deploy cannot report failure
+// that way - the caller reads the final line instead.
+func streamDeploy(w http.ResponseWriter, digest, imageRef string, events <-chan rollout.Event) {
+	w.Header().Set("Content-Type", api.ContentTypeNDJSON)
+	// Ask intermediaries not to buffer; a proxy holding the response defeats the
+	// point of streaming it.
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w) // Encode writes a trailing newline, which is the framing
+	flusher, canFlush := w.(http.Flusher)
+
+	flush := func() {
+		if canFlush {
+			// Without this the bytes sit in Go's response buffer until it fills
+			// or the handler returns, so the client sees nothing until the end.
+			flusher.Flush()
+		}
+	}
+
+	res := rollout.CollectFunc(events, func(e rollout.Event) error {
+		if err := enc.Encode(toAPIEvent(e)); err != nil {
+			return err // client hung up; CollectFunc keeps draining
+		}
+		flush()
+		return nil
+	})
+
+	final := api.Result{
+		Kind:     api.KindResult,
+		Digest:   digest,
+		Image:    imageRef,
+		Deployed: res.Succeeded(),
+	}
+	if !res.Succeeded() {
+		final.Error = res.Err.Error()
+	}
+
+	_ = enc.Encode(final)
+	flush()
+}
+
+func toAPIEvent(e rollout.Event) api.Event {
+	return api.Event{
+		Kind:    api.KindEvent,
+		Phase:   string(e.Phase),
+		Message: e.Message,
+		At:      e.At,
+		Error:   e.Err,
+	}
+}
+
+func toAPIEvents(in []rollout.Event) []api.Event {
+	out := make([]api.Event, 0, len(in))
+	for _, e := range in {
+		out = append(out, toAPIEvent(e))
+	}
+	return out
+}
+
+func writeResult(w http.ResponseWriter, status int, body api.Result) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)

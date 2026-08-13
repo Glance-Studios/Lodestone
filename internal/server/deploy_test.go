@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/image"
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
 )
@@ -93,7 +94,7 @@ func TestDeployHappyPath(t *testing.T) {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body)
 	}
 
-	var got DeployResponse
+	var got api.Result
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decoding body: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestDeployRolledBackReports409(t *testing.T) {
 		t.Fatalf("code = %d, want 409", rec.Code)
 	}
 
-	var got DeployResponse
+	var got api.Result
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decoding body: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestDeployPackagingFailureReports502(t *testing.T) {
 		t.Fatalf("code = %d, want 502", rec.Code)
 	}
 
-	var got DeployResponse
+	var got api.Result
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decoding body: %v", err)
 	}
