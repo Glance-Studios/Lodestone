@@ -21,12 +21,15 @@ POST /deploy  â”€â”€â–¶  store the artifact by content digest
 
 ## Status
 
-**Working prototype, verified against a real cluster.** The pipeline above runs end to end - a real
-deploy to k3s, a real automatic rollback with zero downtime, and 162 tests passing under `-race`.
+**Working prototype, verified against real infrastructure.** The pipeline above runs end to end: a
+plugin jar deployed onto a live Paper server on k3s, digest-pinned, with the health gate passing on a
+TCP probe - and a real automatic rollback with zero downtime when a rollout stalled. 162 tests pass
+under `-race`.
 
 Not yet built, and designed but absent: environment scopes (dev/staging/prod), promotion between them,
-ledger retention/pruning, artifact signature verification, prebuilt release binaries, and a container
-image. Treat it as something that works rather than something finished.
+retention and pruning, artifact signature verification, scoped RBAC with the agent running as a pod,
+prebuilt release binaries, and a container image. Treat it as something that works rather than
+something finished.
 
 ## Install
 
