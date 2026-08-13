@@ -45,6 +45,11 @@ type Target struct {
 
 	// MaxReplicas caps what a deploy may scale to. Zero means the default.
 	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+
+	// Retain is how many ledger entries to keep, and with them their artifacts
+	// and image manifests. Zero means the default. Never below 2: one entry is
+	// the running revision and the next is the rollback target.
+	Retain int `json:"retain,omitempty"`
 }
 
 // Defaults applied when a field is unset.
@@ -52,6 +57,11 @@ const (
 	DefaultDestPath      = "/plugins/app.jar"
 	DefaultSettleTimeout = 10 * time.Minute
 	DefaultMaxReplicas   = 10
+	DefaultRetain        = 10
+
+	// MinRetain is the floor. One entry is the running revision, the next is the
+	// rollback target; keeping fewer would break rollback.
+	MinRetain = 2
 )
 
 // Config is the targets file.
@@ -182,6 +192,15 @@ func normalise(name string, t Target) (Target, error) {
 	}
 	if t.MaxReplicas < 1 {
 		return Target{}, fmt.Errorf("target %q: maxReplicas must be at least 1", name)
+	}
+
+	if t.Retain == 0 {
+		t.Retain = DefaultRetain
+	}
+	if t.Retain < MinRetain {
+		return Target{}, fmt.Errorf(
+			"target %q: retain %d is below %d - one entry is the running revision and the next is the rollback target",
+			name, t.Retain, MinRetain)
 	}
 
 	return t, nil

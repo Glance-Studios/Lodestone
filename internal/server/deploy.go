@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Glance-Studios/Lodestone/internal/api"
 	"github.com/Glance-Studios/Lodestone/internal/image"
@@ -90,7 +92,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	name := r.PathValue("target")
 
 	if wantsStream(r) {
-		streamDeploy(w, name, art.Digest, built.Ref, replicas, events)
+		deployed := streamDeploy(w, name, art.Digest, built.Ref, replicas, events)
+		s.afterDeploy(r.Context(), name, t, art.Digest, built.Ref, deployed)
 		return
 	}
 
@@ -112,7 +115,34 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 		status = http.StatusConflict
 	}
 	writeResult(w, status, out)
+
+	s.afterDeploy(r.Context(), name, t, art.Digest, built.Ref, res.Succeeded())
 }
+
+// afterDeploy records what is now live and trims the retention window.
+//
+// Runs after the response is written, so housekeeping never delays the caller
+// and cannot turn a successful deploy into a failed one. It uses a context
+// detached from the request for the same reason: the client hanging up must not
+// abandon the ledger half-updated.
+func (s *Server) afterDeploy(ctx context.Context, name string, t *targetState, artifactDigest, imageRef string, deployed bool) {
+	warn := func(msg string) { fmt.Fprintf(os.Stderr, "lodestoned: %s\n", msg) }
+
+	if deployed {
+		if _, err := t.Ledger.MarkDeployed(artifactDigest, imageRef); err != nil {
+			warn(fmt.Sprintf("mark %s deployed: %v", artifactDigest, err))
+		}
+	}
+
+	pruneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneTimeout)
+	defer cancel()
+
+	s.prune(pruneCtx, name, t, warn)
+}
+
+// pruneTimeout bounds housekeeping. Generous enough for a slow registry, short
+// enough that a hung one does not hold the deploy lock indefinitely.
+const pruneTimeout = 2 * time.Minute
 
 // receive stores the request body and records it in the target's ledger. It
 // writes its own error response and reports whether to continue.
@@ -183,7 +213,8 @@ func wantsStream(r *http.Request) bool {
 // It always responds 200. A status code is sent with the first byte of the body
 // and cannot be revised afterwards, so a streamed deploy cannot report failure
 // that way - the caller reads the final line instead.
-func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas *int32, events <-chan rollout.Event) {
+// It returns whether the deploy succeeded, so the caller can record it.
+func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas *int32, events <-chan rollout.Event) bool {
 	w.Header().Set("Content-Type", api.ContentTypeNDJSON)
 	// Ask intermediaries not to buffer; a proxy holding the response defeats the
 	// point of streaming it.
@@ -224,6 +255,8 @@ func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas
 
 	_ = enc.Encode(final)
 	flush()
+
+	return res.Succeeded()
 }
 
 func toAPIEvent(e rollout.Event) api.Event {

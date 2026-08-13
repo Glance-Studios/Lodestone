@@ -24,6 +24,10 @@ type TargetSpec struct {
 	Packager Packager
 	Deployer Deployer
 	Ledger   *ledger.Ledger
+
+	// Deleter prunes image manifests. Optional: without it the ledger and
+	// artifact store are still pruned, and manifests are left alone.
+	Deleter Deleter
 }
 
 // targetState adds the server's own per-target state to a spec.

@@ -75,8 +75,8 @@ func run() error {
 			t := targets[name]
 			fmt.Printf("target %-16s %s\n", name, t.Describe())
 			fmt.Printf("       %-16s %s -> %s at %s\n", "", t.BaseImage, t.Repo, t.DestPath)
-			fmt.Printf("       %-16s settle %s, max %d replicas\n", "",
-				time.Duration(t.SettleTimeout), t.MaxReplicas)
+			fmt.Printf("       %-16s settle %s, max %d replicas, retain %d\n", "",
+				time.Duration(t.SettleTimeout), t.MaxReplicas, t.Retain)
 		}
 	}
 
@@ -123,15 +123,20 @@ func buildTargets(cfg config.Config, targets map[string]target.Target) (map[stri
 			return rollout.Deploy(ctx, dep, imageRef, o)
 		}
 
+		// One Packager serves both roles: it pushes images and prunes the
+		// manifests it pushed, both against the same repository path.
+		packager := &image.Packager{
+			Base:     t.BaseImage,
+			Repo:     t.Repo,
+			DestPath: t.DestPath,
+		}
+
 		out[name] = server.TargetSpec{
-			Config: t,
-			Packager: &image.Packager{
-				Base:     t.BaseImage,
-				Repo:     t.Repo,
-				DestPath: t.DestPath,
-			},
+			Config:   t,
+			Packager: packager,
 			Deployer: deployer,
 			Ledger:   led,
+			Deleter:  packager,
 		}
 	}
 

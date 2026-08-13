@@ -3,8 +3,10 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,17 @@ func (s *Store) Open(digest string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("open artifact %s: %w", digest, err)
 	}
 	return f, nil
+}
+
+// Remove deletes a stored artifact. A digest that is already gone is not an
+// error: pruning runs repeatedly and must be idempotent.
+func (s *Store) Remove(digest string) error {
+	path := filepath.Join(s.dir, strings.TrimPrefix(digest, "sha256:")+".jar")
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove artifact %s: %w", digest, err)
+	}
+	return nil
 }
 
 // Put streams the artifact from r into the store

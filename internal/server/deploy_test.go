@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Glance-Studios/Lodestone/internal/api"
-	"github.com/Glance-Studios/Lodestone/internal/image"
 	"github.com/Glance-Studios/Lodestone/internal/rollout"
 	"github.com/Glance-Studios/Lodestone/internal/store"
 	"github.com/Glance-Studios/Lodestone/internal/target"
@@ -31,8 +30,9 @@ func TestDeployHappyPath(t *testing.T) {
 	if got.Target != "dev-lobby" {
 		t.Errorf("Target = %q, want dev-lobby", got.Target)
 	}
-	if got.Image != "reg/dev/lobby@sha256:dev" {
-		t.Errorf("Image = %q", got.Image)
+	// The image is this target's repository, pinned by digest.
+	if !strings.HasPrefix(got.Image, "reg/dev/lobby@sha256:") {
+		t.Errorf("Image = %q, want reg/dev/lobby@sha256:...", got.Image)
 	}
 	if len(got.Events) == 0 {
 		t.Error("Events is empty")
@@ -90,7 +90,7 @@ func TestDeployTargetWithoutPipeline(t *testing.T) {
 		Store:   st,
 		Targets: map[string]TargetSpec{
 			"ledger-only": {
-				Config: target.Target{Token: devToken, MaxReplicas: 3},
+				Config: target.Target{Token: devToken, MaxReplicas: 3, Retain: 100},
 				Ledger: newLedger(t),
 			},
 		},
@@ -205,8 +205,8 @@ func blockingFixture(t *testing.T) (*fixture, chan struct{}, chan struct{}) {
 	fastDeployer := &recordingDeployer{succeed: true}
 
 	f := &fixture{
-		devPackager:  &fakePackager{built: image.Built{Ref: "reg/dev@sha256:1"}},
-		prodPackager: &fakePackager{built: image.Built{Ref: "reg/prod@sha256:2"}},
+		devPackager:  &uniquePackager{prefix: "reg/dev"},
+		prodPackager: &uniquePackager{prefix: "reg/prod"},
 		prodDeployer: fastDeployer,
 		devLedger:    newLedger(t),
 		prodLedger:   newLedger(t),
@@ -217,13 +217,13 @@ func blockingFixture(t *testing.T) (*fixture, chan struct{}, chan struct{}) {
 		Store:   st,
 		Targets: map[string]TargetSpec{
 			"dev-lobby": {
-				Config:   target.Target{Token: devToken, MaxReplicas: 5},
+				Config:   target.Target{Token: devToken, MaxReplicas: 5, Retain: 100},
 				Packager: f.devPackager,
 				Deployer: blocking,
 				Ledger:   f.devLedger,
 			},
 			"prod-lobby": {
-				Config:   target.Target{Token: prodToken, MaxReplicas: 20},
+				Config:   target.Target{Token: prodToken, MaxReplicas: 20, Retain: 100},
 				Packager: f.prodPackager,
 				Deployer: fastDeployer.deploy,
 				Ledger:   f.prodLedger,

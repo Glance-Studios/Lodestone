@@ -96,6 +96,102 @@ func (l *Ledger) Entries() []Entry {
 	return out
 }
 
+// MarkDeployed records that a digest is the one now live, clearing the flag from
+// whatever held it before. Exactly one entry is deployed at a time.
+//
+// It reports whether the digest was found, so a caller can tell "recorded" from
+// "that digest is not in this ledger".
+func (l *Ledger) MarkDeployed(digest, imageRef string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	found := false
+	for i := range l.entries {
+		if l.entries[i].Digest == digest {
+			l.entries[i].Deployed = true
+			if imageRef != "" {
+				l.entries[i].Image = imageRef
+			}
+			found = true
+		} else {
+			l.entries[i].Deployed = false
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	return true, l.save()
+}
+
+// Prune keeps the newest keep entries and drops the rest, returning the dropped
+// entries so a caller can remove what they referenced. Whole entries rather than
+// digests, because each one records the image it was packaged into.
+//
+// A deployed entry is never dropped, however old. Rolling back to a revision
+// whose record was pruned is not a recoverable position, so the entry survives
+// even if it falls outside the window - which means Prune can return fewer than
+// it was asked to drop, on purpose.
+//
+// keep below 2 is raised to 2: one entry is the running revision and the next is
+// the rollback target, so a tighter window would break rollback.
+func (l *Ledger) Prune(keep int) ([]Entry, error) {
+	if keep < 2 {
+		keep = 2
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(l.entries) <= keep {
+		return nil, nil
+	}
+
+	// Newest first, so the window is the front of the slice.
+	byNewest := slices.Clone(l.entries)
+	slices.SortFunc(byNewest, func(a, b Entry) int { return b.At.Compare(a.At) })
+
+	kept := make([]Entry, 0, keep+1)
+	var dropped []Entry
+
+	for i, e := range byNewest {
+		switch {
+		case i < keep:
+			kept = append(kept, e)
+		case e.Deployed:
+			// Outside the window but live: keep it anyway.
+			kept = append(kept, e)
+		default:
+			dropped = append(dropped, e)
+		}
+	}
+
+	if len(dropped) == 0 {
+		return nil, nil
+	}
+
+	previous := l.entries
+	l.entries = kept
+
+	if err := l.save(); err != nil {
+		l.entries = previous // keep memory consistent with disk
+		return nil, err
+	}
+	return dropped, nil
+}
+
+// Digests returns every digest the ledger still records. Used to decide whether a
+// stored artifact is referenced by any target before deleting it.
+func (l *Ledger) Digests() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	out := make([]string, 0, len(l.entries))
+	for _, e := range l.entries {
+		out = append(out, e.Digest)
+	}
+	return out
+}
+
 // save writes the ledger to disk. The caller must hold l.mu.
 func (l *Ledger) save() error {
 	data, err := json.MarshalIndent(l.entries, "", "  ")

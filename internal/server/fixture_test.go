@@ -3,6 +3,8 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -26,26 +28,6 @@ const (
 	devToken  = "dev-token"
 	prodToken = "prod-token"
 )
-
-// fakePackager records what it was given and returns a canned image reference.
-type fakePackager struct {
-	gotBytes string
-	built    image.Built
-	err      error
-}
-
-func (f *fakePackager) Package(ctx context.Context, r io.Reader) (image.Built, error) {
-	b, err := io.ReadAll(r)
-	if err != nil {
-		return image.Built{}, err
-	}
-	f.gotBytes = string(b)
-
-	if f.err != nil {
-		return image.Built{}, f.err
-	}
-	return f.built, nil
-}
 
 // recordingDeployer notes the replica count it was asked for and emits a fixed
 // outcome.
@@ -93,16 +75,46 @@ func newLedger(t *testing.T) *ledger.Ledger {
 	return l
 }
 
+// uniquePackager returns a distinct image reference per call, so pruning tests
+// can tell one revision's manifest from another's.
+type uniquePackager struct {
+	prefix string
+	n      int
+	err    error
+
+	gotBytes string
+}
+
+func (p *uniquePackager) Package(ctx context.Context, r io.Reader) (image.Built, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return image.Built{}, err
+	}
+	p.gotBytes = string(b)
+
+	if p.err != nil {
+		return image.Built{}, p.err
+	}
+
+	// Derive the image digest from the artifact bytes, so identical uploads yield
+	// identical images - as the real packager does.
+	sum := sha256.Sum256(b)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	p.n++
+	return image.Built{Ref: p.prefix + "@" + digest, Digest: digest}, nil
+}
+
 // fixture is a server with two targets, dev and prod, each with its own token,
 // ledger, packager and deployer.
 type fixture struct {
-	srv *Server
+	srv   *Server
+	store *store.Store
 
-	devPackager *fakePackager
+	devPackager *uniquePackager
 	devDeployer *recordingDeployer
 	devLedger   *ledger.Ledger
 
-	prodPackager *fakePackager
+	prodPackager *uniquePackager
 	prodDeployer *recordingDeployer
 	prodLedger   *ledger.Ledger
 }
@@ -113,27 +125,40 @@ func newFixture(t *testing.T) *fixture {
 }
 
 // newFixtureWith builds the two-target fixture, choosing whether each target's
-// deploy succeeds.
+// deploy succeeds. Retention is generous so ordinary tests never see pruning.
 func newFixtureWith(t *testing.T, devOK, prodOK bool) *fixture {
+	t.Helper()
+	return build(t, devOK, prodOK, 100)
+}
+
+// newFixtureWithRetain builds the fixture with a tight retention window, so
+// pruning happens within a handful of deploys.
+func newFixtureWithRetain(t *testing.T, retain int) *fixture {
+	t.Helper()
+	return build(t, true, true, retain)
+}
+
+func build(t *testing.T, devOK, prodOK bool, retain int) *fixture {
 	t.Helper()
 
 	f := &fixture{
-		devPackager:  &fakePackager{built: image.Built{Ref: "reg/dev/lobby@sha256:dev", Digest: "sha256:dev"}},
+		store:        newStore(t),
+		devPackager:  &uniquePackager{prefix: "reg/dev/lobby"},
 		devDeployer:  &recordingDeployer{succeed: devOK},
 		devLedger:    newLedger(t),
-		prodPackager: &fakePackager{built: image.Built{Ref: "reg/prod/lobby@sha256:prod", Digest: "sha256:prod"}},
+		prodPackager: &uniquePackager{prefix: "reg/prod/lobby"},
 		prodDeployer: &recordingDeployer{succeed: prodOK},
 		prodLedger:   newLedger(t),
 	}
 
 	f.srv = New(Options{
 		Version: "test",
-		Store:   newStore(t),
+		Store:   f.store,
 		Targets: map[string]TargetSpec{
 			"dev-lobby": {
 				Config: target.Target{
 					Namespace: "hideaway-dev", Deployment: "lobby", Container: "paper",
-					Token: devToken, MaxReplicas: 5,
+					Token: devToken, MaxReplicas: 5, Retain: retain,
 				},
 				Packager: f.devPackager,
 				Deployer: f.devDeployer.deploy,
@@ -142,7 +167,7 @@ func newFixtureWith(t *testing.T, devOK, prodOK bool) *fixture {
 			"prod-lobby": {
 				Config: target.Target{
 					Namespace: "hideaway-prod", Deployment: "lobby", Container: "paper",
-					Token: prodToken, MaxReplicas: 20,
+					Token: prodToken, MaxReplicas: 20, Retain: retain,
 				},
 				Packager: f.prodPackager,
 				Deployer: f.prodDeployer.deploy,
@@ -152,6 +177,11 @@ func newFixtureWith(t *testing.T, devOK, prodOK bool) *fixture {
 	})
 
 	return f
+}
+
+// setDeleter attaches a manifest deleter to a target after construction.
+func (f *fixture) setDeleter(name string, d Deleter) {
+	f.srv.targets[name].Deleter = d
 }
 
 // do sends a request and returns the recorder.
