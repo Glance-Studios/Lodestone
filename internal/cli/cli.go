@@ -121,17 +121,43 @@ func Run(ctx context.Context, env Env, args []string) int {
 	registerGlobals(sub, &g)
 	sub.Usage = func() { printCommandUsage(env, cmd, sub) }
 
-	if err := sub.Parse(cmdArgs); err != nil {
+	positional, err := parseInterspersed(sub, cmdArgs)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitOK
 		}
 		return ExitUsage
 	}
 
-	if err := cmd.Run(ctx, env, g, sub.Args()); err != nil {
+	if err := cmd.Run(ctx, env, g, positional); err != nil {
 		return report(env, err)
 	}
 	return ExitOK
+}
+
+// parseInterspersed parses flags that may appear before, after, or among the
+// positional arguments, and returns the positionals.
+//
+// Stdlib flag stops at the first non-flag argument, so a plain Parse would treat
+// everything in `deploy plugin.jar --api http://x` after the filename as
+// positional - including the flag. Parsing, taking one positional, and parsing
+// again handles both orders, which is what people actually type.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
 }
 
 // report prints an error the way a CLI should and picks the exit code.
