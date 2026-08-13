@@ -32,6 +32,11 @@ type Entry struct {
 
 	Deployed bool   `json:"deployed"`
 	Image    string `json:"image,omitempty"` // the pushed image, once packaged
+
+	// BaseImage is the base this was appended onto, pinned by digest even when
+	// the target names a moving tag. Without it, "which world was this built on?"
+	// has no answer once the tag has moved.
+	BaseImage string `json:"baseImage,omitempty"`
 }
 
 // Ledger is an append-only record persisted as a single JSON file. It is safe
@@ -101,7 +106,7 @@ func (l *Ledger) Entries() []Entry {
 //
 // It reports whether the digest was found, so a caller can tell "recorded" from
 // "that digest is not in this ledger".
-func (l *Ledger) MarkDeployed(digest, imageRef string) (bool, error) {
+func (l *Ledger) MarkDeployed(digest, imageRef, baseRef string) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -111,6 +116,9 @@ func (l *Ledger) MarkDeployed(digest, imageRef string) (bool, error) {
 			l.entries[i].Deployed = true
 			if imageRef != "" {
 				l.entries[i].Image = imageRef
+			}
+			if baseRef != "" {
+				l.entries[i].BaseImage = baseRef
 			}
 			found = true
 		} else {

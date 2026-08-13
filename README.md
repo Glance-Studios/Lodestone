@@ -1,4 +1,4 @@
-﻿# ðŸ§­ Lodestone
+# 🧭 Lodestone
 
 A deploy agent for Kubernetes: artifact in, health-gated rollout, automatic rollback, and a ledger of
 what shipped where.
@@ -10,7 +10,7 @@ a bash script. Neither suits a small team that wants automated, observable deplo
 day without a commit being the trigger.
 
 ```
-POST /deploy  â”€â”€â–¶  store the artifact by content digest
+POST /deploy  ──▶  store the artifact by content digest
                    record it in the ledger (who, when, version, sha256)
                    append it as a layer onto a cached base image
                    push to the registry
@@ -23,11 +23,11 @@ POST /deploy  â”€â”€â–¶  store the artifact by content digest
 
 **Working prototype, verified against real infrastructure.** The pipeline above runs end to end: a
 plugin jar deployed onto a live Paper server on k3s, digest-pinned, with the health gate passing on a
-TCP probe - and a real automatic rollback with zero downtime when a rollout stalled. 162 tests pass
+TCP probe - and a real automatic rollback with zero downtime when a rollout stalled. 187 tests pass
 under `-race`.
 
 Not yet built, and designed but absent: environment scopes (dev/staging/prod), promotion between them,
-retention and pruning, artifact signature verification, scoped RBAC with the agent running as a pod,
+artifact signature verification, scoped RBAC with the agent running as a pod,
 prebuilt release binaries, and a container image. Treat it as something that works rather than
 something finished.
 
@@ -71,7 +71,7 @@ map:
       "namespace":     "hideaway-dev",
       "deployment":    "lobby",
       "container":     "paper",
-      "baseImage":     "localhost:5000/hideaway/paper:26.2-87",
+      "baseImage":     "localhost:5000/hideaway/lobby-base:current",
       "repo":          "localhost:5000/dev/lobby",
       "destPath":      "/plugins/app.jar",
       "tokenEnv":      "LODESTONE_TOKEN_DEV_LOBBY",
@@ -128,14 +128,15 @@ deploy.
 ```bash
 $ lodestone deploy build/libs/myplugin.jar
 deploying build/libs/myplugin.jar to dev-lobby
-  starting      deploying localhost:5000/dev/lobby@sha256:acac48â€¦ to deployment hideaway-dev/lobby (container paper)
-  updating      replacing localhost:5000/hideaway/paper:26.2-87
+  starting      deploying localhost:5000/dev/lobby@sha256:acac48… to deployment hideaway-dev/lobby (container paper)
+  updating      replacing localhost:5000/dev/lobby@sha256:fa13ee…
   settling      waiting for the rollout to settle
   checking      gating on 1 health check(s)
-  succeeded     deployed localhost:5000/dev/lobby@sha256:acac48â€¦
+  succeeded     deployed localhost:5000/dev/lobby@sha256:acac48…
 
 artifact  sha256:d43ec8b762ba10b7487998a163c36589057b82114c5c714d726c806827edc2d1
 image     localhost:5000/dev/lobby@sha256:acac48a1457fd604aaee022f1cd583eb1abb25e225bffbc08092a5bffc9b8164
+base      localhost:5000/hideaway/lobby-base@sha256:9c1f2e3d4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f
 result    deployed
 ```
 
@@ -156,9 +157,18 @@ more for load testing:
 lodestone deploy build/libs/myplugin.jar --replicas 2
 ```
 
-Image and replica count move in a single patch, so Kubernetes starts one rollout that knows both. A
-rollback restores the image but **not** the count: it undoes the code that broke, not a capacity
-decision you made on purpose.
+Image and replica count move in a single patch, so Kubernetes starts one rollout that knows both.
+
+**A rollback reverts exactly the fields the deploy set**, and says which either way:
+
+```
+rollout did not settle; replicas restored 4 -> 1
+rollout did not settle; replicas left at 3 (not set by this deploy)
+```
+
+A deploy that changed the count has it restored - that is undoing the operation. A deploy that never
+touched it leaves it alone, because undoing a capacity decision nobody made here would be worse. It is
+reported both ways so nobody is left with a degraded target and no idea there is something outstanding.
 
 ## CLI
 
@@ -220,6 +230,25 @@ Plus one variable per target naming its token, if you use `tokenEnv` - e.g.
 | `healthAddr` | - | TCP connect must succeed (`host:port`) |
 | `settleTimeout` | `10m` | how long to watch a rollout. Set above `progressDeadlineSeconds` |
 | `maxReplicas` | `10` | cap on `--replicas` for this target |
+| `retain` | `10` | ledger entries to keep, with their artifacts and manifests. Minimum 2 |
+
+**Retention.** After a successful deploy, entries beyond `retain` are dropped along with their stored
+jars and pushed manifests. The **deployed entry is never dropped** however old it is, and `retain` floors
+at **2** - one entry is the running revision and the next is the rollback target, so a tighter window
+would break rollback.
+
+An artifact is only deleted once **no** target's ledger references it: the store is shared, so an
+identical jar deployed to dev and prod is stored once, and pruning per target would take the file out
+from under the other.
+
+Manifests are unlinked from the registry and nothing more. The registry does not free the blobs until
+`registry garbage-collect` runs, which wants it read-only - that is registry maintenance, not a deploy
+agent's business. A registry with `REGISTRY_STORAGE_DELETE_ENABLED` unset rejects deletes; Lodestone
+reports that once and carries on pruning the ledger and store.
+
+Count retention in **world revisions, not deploys**. A plugin deploy adds a ~2.5 MB layer, but a new
+base adds the whole world - layer sharing keeps everything else cheap, so what pins disk is how many
+distinct bases your retained manifests still reference.
 
 ### CLI (`lodestone`)
 
@@ -253,8 +282,8 @@ A second deploy to a target already deploying gets `423 Locked` and a `Retry-Aft
 one object per line, discriminated by `kind`:
 
 ```
-{"kind":"event","phase":"settling","message":"waiting for the rollout to settle","at":"â€¦"}
-{"kind":"result","target":"dev-lobby","digest":"sha256:â€¦","image":"â€¦@sha256:â€¦","deployed":true}
+{"kind":"event","phase":"settling","message":"waiting for the rollout to settle","at":"…"}
+{"kind":"result","target":"dev-lobby","digest":"sha256:…","image":"…@sha256:…","deployed":true}
 ```
 
 **A streamed deploy always returns HTTP 200**, even when it fails. A status code is sent with the first
@@ -263,9 +292,30 @@ not the status.
 
 ## How it works
 
-**Deploy by digest, never by tag.** The Deployment is pinned to `image@sha256:â€¦`. Tags are mutable;
+**Deploy by digest, never by tag.** The Deployment is pinned to `image@sha256:…`. Tags are mutable;
 digests are not. This removes an entire class of "the thing running is not the thing you approved" -
 and it means an unchanged artifact produces an unchanged digest, so redeploying it is a no-op.
+
+> **What that buys you, concretely.** While this was being built, a base image was published with CRLF
+> line endings in its entrypoint script, so every pod died with
+> `exec /usr/local/bin/entrypoint.sh: no such file or directory`. The file was present and executable -
+> the kernel was looking for an interpreter called `/bin/sh\r`.
+>
+> The fix was easy. Getting it *deployed* was not. The image was rebuilt and pushed **under the same
+> tag**, and the node kept serving the cached broken layer, because `imagePullPolicy: IfNotPresent` did
+> exactly what it says: same tag, already present, no pull. It took a bump to a fresh tag to shift it.
+>
+> That is the mutable-tag problem in one incident, and deploying by digest makes it unrepresentable. A
+> new build is a new digest, so there is nothing for a node to mistake for what it already has.
+
+**A moving base tag is allowed, and pinned in the record.** A dev target can set
+`baseImage: registry/lobby-base:current`, so a new world revision needs no config change. The tag is
+re-resolved to a digest on **every** build - never cached across builds - and that digest is recorded
+in the ledger and returned in the deploy result as `baseImage`. So *"which world was this built on?"*
+stays answerable after the tag has moved.
+
+Staging and prod should pin an exact tag instead. A moving base means a world change can enter a deploy
+nobody chose: fine while iterating, not fine in front of players.
 
 **Layers are appended without a Docker daemon.** `go-containerregistry` pulls a cached base image,
 appends the artifact as a single-file layer, and pushes - a few hundred milliseconds, no build
@@ -315,7 +365,7 @@ pod that legitimately drains for two minutes is not a rollback trigger.
 ## Development
 
 ```bash
-go test ./...          # 162 tests
+go test ./...          # 187 tests
 go test -race ./...    # the race detector, which this code is written against
 go vet ./...
 gofmt -l .             # should print nothing

@@ -122,7 +122,7 @@ func TestRollbackRestoresThePreviousImage(t *testing.T) {
 	if err := d.SetImage(context.Background(), "ghcr.io/x/paper@sha256:bbbb"); err != nil {
 		t.Fatalf("SetImage() error = %v", err)
 	}
-	if err := d.Rollback(context.Background(), original); err != nil {
+	if err := d.Rollback(context.Background(), original, nil); err != nil {
 		t.Fatalf("Rollback() error = %v", err)
 	}
 
@@ -138,8 +138,64 @@ func TestRollbackRestoresThePreviousImage(t *testing.T) {
 func TestRollbackWithNothingToRestore(t *testing.T) {
 	d := newTarget(fixture("img:1", 1))
 
-	if err := d.Rollback(context.Background(), ""); err == nil {
+	if err := d.Rollback(context.Background(), "", nil); err == nil {
 		t.Error("Rollback(\"\") error = nil, want a failure - there is nothing to land on")
+	}
+}
+
+// A rollback that was given a replica count restores it in the same patch.
+func TestRollbackRestoresReplicas(t *testing.T) {
+	const original = "ghcr.io/x/paper@sha256:aaaa"
+	d := newTarget(fixture(original, 1))
+
+	// A deploy that scaled up as well as changing the image.
+	if err := d.SetImageAndReplicas(context.Background(), "ghcr.io/x/paper@sha256:bbbb", 4); err != nil {
+		t.Fatalf("SetImageAndReplicas() error = %v", err)
+	}
+	if n, _ := d.Replicas(context.Background()); n != 4 {
+		t.Fatalf("replicas = %d after scaling, want 4", n)
+	}
+
+	if err := d.Rollback(context.Background(), original, int32p(1)); err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+
+	if got, _ := d.Current(context.Background()); got != original {
+		t.Errorf("image = %q, want %q", got, original)
+	}
+	if n, _ := d.Replicas(context.Background()); n != 1 {
+		t.Errorf("replicas = %d, want 1 restored", n)
+	}
+}
+
+// A rollback given no replica count leaves it where it is.
+func TestRollbackLeavesReplicasWhenNotGiven(t *testing.T) {
+	const original = "ghcr.io/x/paper@sha256:aaaa"
+	d := newTarget(fixture(original, 3))
+
+	if err := d.SetImage(context.Background(), "ghcr.io/x/paper@sha256:bbbb"); err != nil {
+		t.Fatalf("SetImage() error = %v", err)
+	}
+	if err := d.Rollback(context.Background(), original, nil); err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+
+	if n, _ := d.Replicas(context.Background()); n != 3 {
+		t.Errorf("replicas = %d, want 3 left alone", n)
+	}
+}
+
+func TestReplicasDefaultsToOneWhenNil(t *testing.T) {
+	dep := fixture("img:1", 1)
+	dep.Spec.Replicas = nil
+	d := newTarget(dep)
+
+	n, err := d.Replicas(context.Background())
+	if err != nil {
+		t.Fatalf("Replicas() error = %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Replicas() = %d, want 1 - nil means the Kubernetes default", n)
 	}
 }
 

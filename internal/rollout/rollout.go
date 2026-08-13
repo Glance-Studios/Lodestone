@@ -21,6 +21,9 @@ type Target interface {
 	// Current returns the digest the target is presently running.
 	Current(ctx context.Context) (string, error)
 
+	// Replicas returns the target's present desired replica count.
+	Replicas(ctx context.Context) (int32, error)
+
 	// SetImage points the target at digest, starting a rollout.
 	SetImage(ctx context.Context, digest string) error
 
@@ -32,13 +35,14 @@ type Target interface {
 	// an error if the rollout failed or timed out.
 	WaitSettled(ctx context.Context) error
 
-	// Rollback points the target back at toImage.
+	// Rollback points the target back at toImage, and at toReplicas when it is
+	// not nil.
 	//
-	// The image to restore is a parameter rather than something the target
-	// remembers, so implementations hold no rollback state. State on the target
-	// would be shared between concurrent deploys, and the second deploy would
-	// overwrite the first one's memory of what to undo.
-	Rollback(ctx context.Context, toImage string) error
+	// What to restore is passed in rather than remembered by the target, so
+	// implementations hold no rollback state. State on the target would be shared
+	// between concurrent deploys, and the second would overwrite the first one's
+	// memory of what to undo.
+	Rollback(ctx context.Context, toImage string, toReplicas *int32) error
 }
 
 // Phase is where a rollout has reached.
@@ -160,16 +164,32 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 		return
 	}
 
+	// A rollback reverts exactly the fields this deploy set. So the previous
+	// replica count is only worth reading - and only worth restoring - when the
+	// deploy is about to change it. Leaving a count alone that we never touched
+	// is not an omission; undoing someone else's capacity decision would be.
+	var previousReplicas *int32
+
 	if opts.Replicas != nil {
-		emit(PhaseUpdating, fmt.Sprintf("replacing %s, scaling to %d", previous, *opts.Replicas), nil)
+		n, err := target.Replicas(ctx)
+		if err != nil {
+			emit(PhaseFailed, "could not read current replica count", err)
+			return
+		}
+		previousReplicas = &n
+
+		emit(PhaseUpdating, fmt.Sprintf("replacing %s, scaling %d -> %d", previous, n, *opts.Replicas), nil)
 		err = target.SetImageAndReplicas(ctx, digest, *opts.Replicas)
+		if err != nil {
+			emit(PhaseFailed, "could not set image", err)
+			return
+		}
 	} else {
 		emit(PhaseUpdating, fmt.Sprintf("replacing %s", previous), nil)
-		err = target.SetImage(ctx, digest)
-	}
-	if err != nil {
-		emit(PhaseFailed, "could not set image", err)
-		return
+		if err := target.SetImage(ctx, digest); err != nil {
+			emit(PhaseFailed, "could not set image", err)
+			return
+		}
 	}
 
 	// From here a failure means something is half-deployed, so every exit path
@@ -180,7 +200,7 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 	err = target.WaitSettled(settleCtx)
 	cancelSettle()
 	if err != nil {
-		rollBack(ctx, target, previous, emit, "rollout did not settle", err)
+		rollBack(ctx, target, previous, previousReplicas, emit, "rollout did not settle", err)
 		return
 	}
 
@@ -191,7 +211,7 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 		err = health.WaitFor(healthCtx, opts.Checks, opts.healthInterval())
 		cancelHealth()
 		if err != nil {
-			rollBack(ctx, target, previous, emit, "health checks failed", err)
+			rollBack(ctx, target, previous, previousReplicas, emit, "health checks failed", err)
 			return
 		}
 	}
@@ -199,8 +219,13 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 	emit(PhaseSucceeded, "deployed "+digest, nil)
 }
 
-// rollBack points the target back at previous and reports the outcome.
-func rollBack(ctx context.Context, target Target, previous string, emit func(Phase, string, error), why string, cause error) {
+// rollBack reverts exactly what this deploy set: the image always, and the
+// replica count only if the deploy changed it.
+//
+// previousReplicas is nil when the deploy left the count alone, and the count is
+// then left alone on the way out too - undoing a capacity decision nobody made
+// as part of this deploy would be the wrong kind of helpful.
+func rollBack(ctx context.Context, target Target, previous string, previousReplicas *int32, emit func(Phase, string, error), why string, cause error) {
 	emit(PhaseRollingBck, why, cause)
 
 	// Roll back even if ctx is already done - the caller cancelling must not
@@ -208,9 +233,30 @@ func rollBack(ctx context.Context, target Target, previous string, emit func(Pha
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
 
-	if err := target.Rollback(rbCtx, previous); err != nil {
+	// Read the count before restoring, so the report can state both ends of it.
+	current, replicasErr := target.Replicas(rbCtx)
+
+	if err := target.Rollback(rbCtx, previous, previousReplicas); err != nil {
 		emit(PhaseFailed, "rollback failed: "+why, errors.Join(cause, err))
 		return
 	}
-	emit(PhaseFailed, why, errors.Join(cause, ErrRolledBack))
+
+	emit(PhaseFailed, why+"; "+replicaNote(current, previousReplicas, replicasErr),
+		errors.Join(cause, ErrRolledBack))
+}
+
+// replicaNote states what happened to the replica count, either way. Silence
+// about a count left at 2 is how an operator ends up with a degraded target and
+// no idea there is anything to undo.
+func replicaNote(current int32, restoredTo *int32, readErr error) string {
+	if restoredTo == nil {
+		if readErr != nil {
+			return "replicas left alone (not set by this deploy)"
+		}
+		return fmt.Sprintf("replicas left at %d (not set by this deploy)", current)
+	}
+	if readErr != nil {
+		return fmt.Sprintf("replicas restored to %d", *restoredTo)
+	}
+	return fmt.Sprintf("replicas restored %d -> %d", current, *restoredTo)
 }

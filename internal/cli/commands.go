@@ -156,6 +156,11 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 		if res.Image != "" {
 			fmt.Fprintf(env.Out, "image     %s\n", res.Image)
 		}
+		// Always show the base by digest. With a moving base tag this is the only
+		// record of which world the build went onto.
+		if res.BaseImage != "" {
+			fmt.Fprintf(env.Out, "base      %s\n", res.BaseImage)
+		}
 		if res.Deployed {
 			fmt.Fprintln(env.Out, "result    deployed")
 		} else {

@@ -101,7 +101,7 @@ func (p *uniquePackager) Package(ctx context.Context, r io.Reader) (image.Built,
 	sum := sha256.Sum256(b)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
 	p.n++
-	return image.Built{Ref: p.prefix + "@" + digest, Digest: digest}, nil
+	return image.Built{Ref: p.prefix + "@" + digest, Digest: digest, BaseRef: p.prefix + "-base@sha256:basebasebase"}, nil
 }
 
 // fixture is a server with two targets, dev and prod, each with its own token,

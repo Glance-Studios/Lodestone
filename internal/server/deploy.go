@@ -92,19 +92,20 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	name := r.PathValue("target")
 
 	if wantsStream(r) {
-		deployed := streamDeploy(w, name, art.Digest, built.Ref, replicas, events)
-		s.afterDeploy(r.Context(), name, t, art.Digest, built.Ref, deployed)
+		deployed := streamDeploy(w, name, art.Digest, built, replicas, events)
+		s.afterDeploy(r.Context(), name, t, art.Digest, built, deployed)
 		return
 	}
 
 	res := rollout.Collect(events)
 	out := api.Result{
-		Target:   name,
-		Digest:   art.Digest,
-		Image:    built.Ref,
-		Replicas: replicas,
-		Deployed: res.Succeeded(),
-		Events:   toAPIEvents(res.Events),
+		Target:    name,
+		Digest:    art.Digest,
+		Image:     built.Ref,
+		BaseImage: built.BaseRef,
+		Replicas:  replicas,
+		Deployed:  res.Succeeded(),
+		Events:    toAPIEvents(res.Events),
 	}
 
 	status := http.StatusOK
@@ -116,7 +117,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	}
 	writeResult(w, status, out)
 
-	s.afterDeploy(r.Context(), name, t, art.Digest, built.Ref, res.Succeeded())
+	s.afterDeploy(r.Context(), name, t, art.Digest, built, res.Succeeded())
 }
 
 // afterDeploy records what is now live and trims the retention window.
@@ -125,11 +126,11 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 // and cannot turn a successful deploy into a failed one. It uses a context
 // detached from the request for the same reason: the client hanging up must not
 // abandon the ledger half-updated.
-func (s *Server) afterDeploy(ctx context.Context, name string, t *targetState, artifactDigest, imageRef string, deployed bool) {
+func (s *Server) afterDeploy(ctx context.Context, name string, t *targetState, artifactDigest string, built image.Built, deployed bool) {
 	warn := func(msg string) { fmt.Fprintf(os.Stderr, "lodestoned: %s\n", msg) }
 
 	if deployed {
-		if _, err := t.Ledger.MarkDeployed(artifactDigest, imageRef); err != nil {
+		if _, err := t.Ledger.MarkDeployed(artifactDigest, built.Ref, built.BaseRef); err != nil {
 			warn(fmt.Sprintf("mark %s deployed: %v", artifactDigest, err))
 		}
 	}
@@ -214,7 +215,7 @@ func wantsStream(r *http.Request) bool {
 // and cannot be revised afterwards, so a streamed deploy cannot report failure
 // that way - the caller reads the final line instead.
 // It returns whether the deploy succeeded, so the caller can record it.
-func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas *int32, events <-chan rollout.Event) bool {
+func streamDeploy(w http.ResponseWriter, name, digest string, built image.Built, replicas *int32, events <-chan rollout.Event) bool {
 	w.Header().Set("Content-Type", api.ContentTypeNDJSON)
 	// Ask intermediaries not to buffer; a proxy holding the response defeats the
 	// point of streaming it.
@@ -242,12 +243,13 @@ func streamDeploy(w http.ResponseWriter, name, digest, imageRef string, replicas
 	})
 
 	final := api.Result{
-		Kind:     api.KindResult,
-		Target:   name,
-		Digest:   digest,
-		Image:    imageRef,
-		Replicas: replicas,
-		Deployed: res.Succeeded(),
+		Kind:      api.KindResult,
+		Target:    name,
+		Digest:    digest,
+		Image:     built.Ref,
+		BaseImage: built.BaseRef,
+		Replicas:  replicas,
+		Deployed:  res.Succeeded(),
 	}
 	if !res.Succeeded() {
 		final.Error = res.Err.Error()

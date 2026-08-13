@@ -16,12 +16,16 @@ import (
 type fakeTarget struct {
 	mu sync.Mutex
 
-	current  string
-	setTo    []string // every digest SetImage was called with
-	rolled   int      // how many times Rollback was called
-	rolledTo []string // every image Rollback was asked to restore
-	scaledTo []int32  // every replica count SetImageAndReplicas was given
-	settleFn func(ctx context.Context) error
+	current          string
+	setTo            []string // every digest SetImage was called with
+	rolled           int      // how many times Rollback was called
+	rolledTo         []string // every image Rollback was asked to restore
+	rolledToReplicas []*int32 // every replica count Rollback was asked to restore
+	scaledTo         []int32  // every count SetImageAndReplicas was given
+	replicas         int32    // the target's present desired count
+	settleFn         func(ctx context.Context) error
+
+	replicasErr error
 
 	setErr      error
 	currentErr  error
@@ -59,6 +63,9 @@ func (f *fakeTarget) SetImageAndReplicas(ctx context.Context, digest string, rep
 	f.setTo = append(f.setTo, digest)
 	f.current = digest
 	f.scaledTo = append(f.scaledTo, replicas)
+	// Take effect, as a real patch would - otherwise a later Replicas() read
+	// reports the pre-deploy count and the fake lies about the cluster.
+	f.replicas = replicas
 	return nil
 }
 
@@ -79,16 +86,38 @@ func (f *fakeTarget) WaitSettled(ctx context.Context) error {
 	return nil
 }
 
-func (f *fakeTarget) Rollback(ctx context.Context, toImage string) error {
+func (f *fakeTarget) Replicas(ctx context.Context) (int32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replicasErr != nil {
+		return 0, f.replicasErr
+	}
+	return f.replicas, nil
+}
+
+func (f *fakeTarget) Rollback(ctx context.Context, toImage string, toReplicas *int32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rolled++
 	f.rolledTo = append(f.rolledTo, toImage)
+	f.rolledToReplicas = append(f.rolledToReplicas, toReplicas)
+
 	if f.rollbackErr != nil {
 		return f.rollbackErr
 	}
 	f.current = toImage
+	if toReplicas != nil {
+		f.replicas = *toReplicas
+	}
 	return nil
+}
+
+// rollbackReplicas returns the replica counts Rollback was asked to restore, nil
+// entries included.
+func (f *fakeTarget) rollbackReplicas() []*int32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*int32(nil), f.rolledToReplicas...)
 }
 
 func (f *fakeTarget) rollbackCount() int {
@@ -240,10 +269,12 @@ func TestDeploySameDigestStillScales(t *testing.T) {
 	}
 }
 
-// A rollback undoes the code, not a capacity decision.
-func TestRollbackDoesNotRestoreReplicaCount(t *testing.T) {
+// A rollback reverts exactly the fields the deploy set. This deploy changed the
+// replica count, so the rollback restores it.
+func TestRollbackRestoresReplicasTheDeploySet(t *testing.T) {
 	target := &fakeTarget{
 		current:  "sha256:old",
+		replicas: 1,
 		settleFn: func(ctx context.Context) error { return errors.New("crashloop") },
 	}
 
@@ -254,12 +285,84 @@ func TestRollbackDoesNotRestoreReplicaCount(t *testing.T) {
 	if res.Succeeded() {
 		t.Fatal("Succeeded() = true, want failure")
 	}
-	// Scaled once going in, and not scaled again on the way out.
-	if got := target.scaleCalls(); len(got) != 1 {
-		t.Errorf("scale calls = %v, want exactly one - the rollback must not rescale", got)
-	}
 	if got := target.rollbackTargets(); len(got) != 1 || got[0] != "sha256:old" {
 		t.Errorf("rolled back to %v, want [sha256:old]", got)
+	}
+
+	restored := target.rollbackReplicas()
+	if len(restored) != 1 {
+		t.Fatalf("Rollback called %d times, want 1", len(restored))
+	}
+	if restored[0] == nil || *restored[0] != 1 {
+		t.Errorf("restored replicas = %v, want 1 - the count before this deploy", restored[0])
+	}
+
+	// And the report says so, both ends of it.
+	if !strings.Contains(res.Err.Error(), "replicas restored 4 -> 1") {
+		t.Errorf("err = %v, want it to state the replica change", res.Err)
+	}
+}
+
+// This deploy did not touch replicas, so the rollback must not either -
+// undoing a capacity decision nobody made here would be wrong.
+func TestRollbackLeavesReplicasTheDeployDidNotSet(t *testing.T) {
+	target := &fakeTarget{
+		current:  "sha256:old",
+		replicas: 3,
+		settleFn: func(ctx context.Context) error { return errors.New("crashloop") },
+	}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{}))
+
+	if res.Succeeded() {
+		t.Fatal("Succeeded() = true, want failure")
+	}
+
+	restored := target.rollbackReplicas()
+	if len(restored) != 1 {
+		t.Fatalf("Rollback called %d times, want 1", len(restored))
+	}
+	if restored[0] != nil {
+		t.Errorf("restored replicas = %d, want nil - this deploy never set them", *restored[0])
+	}
+
+	// Still reported, so an operator is never left guessing.
+	if !strings.Contains(res.Err.Error(), "replicas left at 3 (not set by this deploy)") {
+		t.Errorf("err = %v, want it to state the count was left alone", res.Err)
+	}
+}
+
+// A deploy that did not change replicas never needs to read them.
+func TestReplicasNotReadWhenNotScaling(t *testing.T) {
+	target := &fakeTarget{
+		current:     "sha256:old",
+		replicasErr: errors.New("should not be called before SetImage"),
+	}
+
+	// A healthy deploy: no rollback, so Replicas is only read if the deploy is
+	// scaling - and it is not.
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{}))
+	if !res.Succeeded() {
+		t.Fatalf("Succeeded() = false, err = %v - a non-scaling deploy must not need the count", res.Err)
+	}
+}
+
+// A count that cannot be read is a failure before anything is changed.
+func TestScalingDeployFailsIfReplicasUnreadable(t *testing.T) {
+	target := &fakeTarget{
+		current:     "sha256:old",
+		replicasErr: errors.New("no such deployment"),
+	}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{
+		Replicas: int32p(2),
+	}))
+
+	if res.Succeeded() {
+		t.Fatal("Succeeded() = true, want failure")
+	}
+	if len(target.setTo) != 0 {
+		t.Error("the image was changed despite not knowing the replica count to undo to")
 	}
 }
 

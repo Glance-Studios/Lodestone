@@ -283,14 +283,14 @@ func TestPackageFailsOnMissingBase(t *testing.T) {
 	}
 }
 
-// The base is cached after the first pull, so a second Package does not refetch.
+// The base is cached between builds, so a second Package does not refetch it.
 func TestBaseIsCached(t *testing.T) {
 	host := testRegistry(t)
 	base := seedBase(t, host)
 
 	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar"}
 
-	if _, err := p.base(context.Background()); err != nil {
+	if _, _, err := p.base(context.Background()); err != nil {
 		t.Fatalf("first base() error = %v", err)
 	}
 	cached := p.baseCache
@@ -298,11 +298,99 @@ func TestBaseIsCached(t *testing.T) {
 		t.Fatal("baseCache is nil after the first pull")
 	}
 
-	if _, err := p.base(context.Background()); err != nil {
+	if _, _, err := p.base(context.Background()); err != nil {
 		t.Fatalf("second base() error = %v", err)
 	}
 	if p.baseCache != cached {
 		t.Error("baseCache was replaced; the second call refetched the base")
+	}
+}
+
+// The base reference is returned pinned by digest, even when configured as a tag.
+func TestBaseResolvesToADigest(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host) // a :latest tag
+
+	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar"}
+
+	_, ref, err := p.base(context.Background())
+	if err != nil {
+		t.Fatalf("base() error = %v", err)
+	}
+	if !strings.Contains(ref, "@sha256:") {
+		t.Errorf("base reference = %q, want it pinned by digest", ref)
+	}
+	if strings.Contains(ref, ":latest") {
+		t.Errorf("base reference = %q, still carries the tag", ref)
+	}
+}
+
+// Package records the base it appended onto, which is the whole point of
+// allowing a moving base tag.
+func TestPackageRecordsTheBase(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host)
+
+	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar"}
+
+	built, err := p.Package(context.Background(), strings.NewReader("jar"))
+	if err != nil {
+		t.Fatalf("Package() error = %v", err)
+	}
+	if !strings.Contains(built.BaseRef, "@sha256:") {
+		t.Errorf("BaseRef = %q, want the base pinned by digest", built.BaseRef)
+	}
+	if built.BaseRef == built.Ref {
+		t.Error("BaseRef equals Ref; the base and the result are different images")
+	}
+}
+
+// A moving tag must be followed. Re-pointing the tag at different content has to
+// change what the next build appends onto - otherwise the cache reintroduces the
+// mutable-tag problem one level up from the Deployment.
+func TestMovingBaseTagIsFollowed(t *testing.T) {
+	host := testRegistry(t)
+
+	tag, err := name.ParseReference(host + "/paper:current")
+	if err != nil {
+		t.Fatalf("parsing ref: %v", err)
+	}
+
+	first, err := random.Image(256, 2)
+	if err != nil {
+		t.Fatalf("building first base: %v", err)
+	}
+	if err := remote.Write(tag, first); err != nil {
+		t.Fatalf("pushing first base: %v", err)
+	}
+
+	p := &Packager{Base: tag.String(), Repo: host + "/builds", DestPath: "/plugins/app.jar"}
+
+	before, err := p.Package(context.Background(), strings.NewReader("jar"))
+	if err != nil {
+		t.Fatalf("first Package() error = %v", err)
+	}
+
+	// Move the tag to different content, as a new world revision would.
+	second, err := random.Image(256, 3)
+	if err != nil {
+		t.Fatalf("building second base: %v", err)
+	}
+	if err := remote.Write(tag, second); err != nil {
+		t.Fatalf("pushing second base: %v", err)
+	}
+
+	after, err := p.Package(context.Background(), strings.NewReader("jar"))
+	if err != nil {
+		t.Fatalf("second Package() error = %v", err)
+	}
+
+	if before.BaseRef == after.BaseRef {
+		t.Errorf("base stayed at %s after the tag moved - the cache is serving stale content", before.BaseRef)
+	}
+	// The same jar onto a different base is a different image.
+	if before.Digest == after.Digest {
+		t.Error("the built digest did not change despite a different base")
 	}
 }
 

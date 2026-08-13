@@ -86,7 +86,8 @@ func (d *Deployment) Replicas(ctx context.Context) (int32, error) {
 	return *dep.Spec.Replicas, nil
 }
 
-// Rollback points the container back at toImage.
+// Rollback points the container back at toImage, and at toReplicas when it is
+// not nil.
 //
 // Deliberately not `kubectl rollout undo`: that walks the Deployment's
 // ReplicaSet history to find a previous pod template, which is indirect and
@@ -94,13 +95,13 @@ func (d *Deployment) Replicas(ctx context.Context) (int32, error) {
 // knows the exact image it replaced, so it hands that back - the same mechanism
 // as any other deploy, and unambiguous about what it lands on.
 //
-// Replica count is deliberately not restored. A rollback undoes the code that
-// broke, not a capacity decision someone made on purpose.
-func (d *Deployment) Rollback(ctx context.Context, toImage string) error {
+// A nil toReplicas leaves the count alone: the caller only passes one when the
+// deploy being undone had changed it.
+func (d *Deployment) Rollback(ctx context.Context, toImage string, toReplicas *int32) error {
 	if toImage == "" {
 		return fmt.Errorf("%s: no image to roll back to", d.Describe())
 	}
-	return d.patch(ctx, toImage, nil)
+	return d.patch(ctx, toImage, toReplicas)
 }
 
 // patch sets the container's image, and optionally the replica count, with a

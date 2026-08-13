@@ -90,7 +90,7 @@ func TestPruneNeverDropsTheDeployedEntry(t *testing.T) {
 	l := seed(t, 10)
 
 	// Mark the OLDEST entry deployed, well outside a window of 3.
-	if ok, err := l.MarkDeployed("sha256:e0", "reg/repo@sha256:live"); err != nil || !ok {
+	if ok, err := l.MarkDeployed("sha256:e0", "reg/repo@sha256:live", ""); err != nil || !ok {
 		t.Fatalf("MarkDeployed() = %v, %v", ok, err)
 	}
 
@@ -190,10 +190,10 @@ func TestPruneReturnsImageReferences(t *testing.T) {
 func TestMarkDeployedIsExclusive(t *testing.T) {
 	l := seed(t, 4)
 
-	if ok, err := l.MarkDeployed("sha256:e1", ""); err != nil || !ok {
+	if ok, err := l.MarkDeployed("sha256:e1", "", ""); err != nil || !ok {
 		t.Fatalf("MarkDeployed(e1) = %v, %v", ok, err)
 	}
-	if ok, err := l.MarkDeployed("sha256:e3", ""); err != nil || !ok {
+	if ok, err := l.MarkDeployed("sha256:e3", "", ""); err != nil || !ok {
 		t.Fatalf("MarkDeployed(e3) = %v, %v", ok, err)
 	}
 
@@ -211,7 +211,7 @@ func TestMarkDeployedIsExclusive(t *testing.T) {
 func TestMarkDeployedRecordsTheImage(t *testing.T) {
 	l := seed(t, 3)
 
-	if _, err := l.MarkDeployed("sha256:e1", "reg/repo@sha256:newimage"); err != nil {
+	if _, err := l.MarkDeployed("sha256:e1", "reg/repo@sha256:newimage", ""); err != nil {
 		t.Fatalf("MarkDeployed() error = %v", err)
 	}
 
@@ -225,7 +225,7 @@ func TestMarkDeployedRecordsTheImage(t *testing.T) {
 func TestMarkDeployedUnknownDigest(t *testing.T) {
 	l := seed(t, 3)
 
-	ok, err := l.MarkDeployed("sha256:absent", "")
+	ok, err := l.MarkDeployed("sha256:absent", "", "")
 	if err != nil {
 		t.Fatalf("MarkDeployed() error = %v", err)
 	}

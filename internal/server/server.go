@@ -109,15 +109,16 @@ func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request, t *
 	out := make([]api.LedgerEntry, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, api.LedgerEntry{
-			Digest:   e.Digest,
-			Size:     e.Size,
-			Target:   e.Target,
-			Version:  e.Version,
-			By:       e.By,
-			At:       e.At,
-			Replicas: e.Replicas,
-			Deployed: e.Deployed,
-			Image:    e.Image,
+			Digest:    e.Digest,
+			Size:      e.Size,
+			Target:    e.Target,
+			Version:   e.Version,
+			By:        e.By,
+			At:        e.At,
+			Replicas:  e.Replicas,
+			Deployed:  e.Deployed,
+			Image:     e.Image,
+			BaseImage: e.BaseImage,
 		})
 	}
 
