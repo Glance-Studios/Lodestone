@@ -122,7 +122,7 @@ func TestRollbackRestoresThePreviousImage(t *testing.T) {
 	if err := d.SetImage(context.Background(), "ghcr.io/x/paper@sha256:bbbb"); err != nil {
 		t.Fatalf("SetImage() error = %v", err)
 	}
-	if err := d.Rollback(context.Background()); err != nil {
+	if err := d.Rollback(context.Background(), original); err != nil {
 		t.Fatalf("Rollback() error = %v", err)
 	}
 
@@ -138,8 +138,8 @@ func TestRollbackRestoresThePreviousImage(t *testing.T) {
 func TestRollbackWithNothingToRestore(t *testing.T) {
 	d := newTarget(fixture("img:1", 1))
 
-	if err := d.Rollback(context.Background()); err == nil {
-		t.Error("Rollback() error = nil, want a failure when SetImage never ran")
+	if err := d.Rollback(context.Background(), ""); err == nil {
+		t.Error("Rollback(\"\") error = nil, want a failure - there is nothing to land on")
 	}
 }
 

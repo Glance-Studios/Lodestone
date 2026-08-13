@@ -19,6 +19,7 @@ type fakeTarget struct {
 	current  string
 	setTo    []string // every digest SetImage was called with
 	rolled   int      // how many times Rollback was called
+	rolledTo []string // every image Rollback was asked to restore
 	settleFn func(ctx context.Context) error
 
 	setErr      error
@@ -59,13 +60,15 @@ func (f *fakeTarget) WaitSettled(ctx context.Context) error {
 	return nil
 }
 
-func (f *fakeTarget) Rollback(ctx context.Context) error {
+func (f *fakeTarget) Rollback(ctx context.Context, toImage string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rolled++
+	f.rolledTo = append(f.rolledTo, toImage)
 	if f.rollbackErr != nil {
 		return f.rollbackErr
 	}
+	f.current = toImage
 	return nil
 }
 
@@ -73,6 +76,12 @@ func (f *fakeTarget) rollbackCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.rolled
+}
+
+func (f *fakeTarget) rollbackTargets() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rolledTo...)
 }
 
 // Compile-time proof the fake satisfies the interface.
@@ -216,6 +225,73 @@ func TestDeployDoesNotRollBackIfNothingChanged(t *testing.T) {
 	}
 	if n := target.rollbackCount(); n != 0 {
 		t.Errorf("rolled back %d times, want 0 - SetImage never took effect", n)
+	}
+}
+
+// Rollback must be told which image to restore, and it must be the one this
+// deploy replaced - not whatever the target happens to be running by then.
+func TestDeployRollsBackToTheImageItReplaced(t *testing.T) {
+	target := &fakeTarget{
+		current:  "sha256:original",
+		settleFn: func(ctx context.Context) error { return errors.New("crashloop") },
+	}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{}))
+
+	if res.Succeeded() {
+		t.Fatal("Succeeded() = true, want failure")
+	}
+
+	got := target.rollbackTargets()
+	if len(got) != 1 {
+		t.Fatalf("Rollback called %d times, want 1", len(got))
+	}
+	if got[0] != "sha256:original" {
+		t.Errorf("rolled back to %q, want %q", got[0], "sha256:original")
+	}
+
+	// And the target really is back on it.
+	if cur, _ := target.Current(context.Background()); cur != "sha256:original" {
+		t.Errorf("target on %q, want %q", cur, "sha256:original")
+	}
+}
+
+// Two deploys in flight against one target must each roll back to the image
+// *they* replaced. This is the bug that shared rollback state on the target
+// caused: the second deploy overwrote the first's memory of what to undo.
+func TestConcurrentDeploysRollBackIndependently(t *testing.T) {
+	failing := func(ctx context.Context) error { return errors.New("did not settle") }
+
+	a := &fakeTarget{current: "sha256:aaa", settleFn: failing}
+	b := &fakeTarget{current: "sha256:bbb", settleFn: failing}
+
+	var wg sync.WaitGroup
+	for _, tc := range []struct {
+		target *fakeTarget
+		want   string
+	}{
+		{a, "sha256:aaa"},
+		{b, "sha256:bbb"},
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			Collect(Deploy(context.Background(), tc.target, "sha256:new", Options{}))
+		}()
+	}
+	wg.Wait()
+
+	for name, tc := range map[string]struct {
+		target *fakeTarget
+		want   string
+	}{
+		"a": {a, "sha256:aaa"},
+		"b": {b, "sha256:bbb"},
+	} {
+		got := tc.target.rollbackTargets()
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("target %s rolled back to %v, want [%s]", name, got, tc.want)
+		}
 	}
 }
 

@@ -33,11 +33,26 @@ type DeployResponse struct {
 
 // handleDeploy accepts an artifact, packages it into an image, pushes it, and
 // rolls the target Deployment onto it - the whole pipeline in one request.
+//
+// Only one deploy runs at a time. Interleaved deploys to one Deployment corrupt
+// each other: if A replaces X with B, then C replaces B with D, and A's rollout
+// then fails, A rolls back to X - silently destroying C's healthy deploy. The
+// rollback is correct in isolation and wrong in company, so the fix is to refuse
+// the overlap rather than to reason about it.
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if s.packager == nil || s.deployer == nil {
 		http.Error(w, "deploying is not configured", http.StatusNotImplemented)
 		return
 	}
+
+	// TryLock rather than Lock: a caller learns immediately that a deploy is in
+	// flight instead of hanging for minutes behind one.
+	if !s.deployMu.TryLock() {
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "a deploy is already in progress", http.StatusLocked)
+		return
+	}
+	defer s.deployMu.Unlock()
 
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	defer body.Close()

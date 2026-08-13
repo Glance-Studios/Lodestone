@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,15 +18,15 @@ import (
 //
 // It satisfies rollout.Target without importing the rollout package - the
 // interface is declared by the consumer, so nothing here refers to it.
+//
+// Deliberately stateless: every method's inputs come from its arguments or the
+// cluster. A remembered "previous image" field would be shared by concurrent
+// deploys, and the second would overwrite what the first needed to undo.
 type Deployment struct {
 	client    kubernetes.Interface
 	namespace string
 	name      string
 	container string
-
-	// mu guards previous, which SetImage records and Rollback restores.
-	mu       sync.Mutex
-	previous string
 }
 
 // NewDeployment returns a target for the named container in namespace/name.
@@ -62,40 +61,23 @@ func (d *Deployment) Current(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("%s: %w", d.Describe(), ErrContainerNotFound)
 }
 
-// SetImage points the container at image, starting a rollout. It remembers the
-// image being replaced so Rollback can restore it.
+// SetImage points the container at image, starting a rollout.
 func (d *Deployment) SetImage(ctx context.Context, image string) error {
-	previous, err := d.Current(ctx)
-	if err != nil {
-		return err
-	}
-
-	if err := d.patchImage(ctx, image); err != nil {
-		return err
-	}
-
-	d.mu.Lock()
-	d.previous = previous
-	d.mu.Unlock()
-	return nil
+	return d.patchImage(ctx, image)
 }
 
-// Rollback restores the image that SetImage replaced.
+// Rollback points the container back at toImage.
 //
 // Deliberately not `kubectl rollout undo`: that walks the Deployment's
 // ReplicaSet history to find a previous pod template, which is indirect and
-// depends on revision history that may have been pruned. Lodestone already knows
-// the exact digest it replaced, so it sets that back - the same mechanism as any
-// other deploy, and unambiguous about what it lands on.
-func (d *Deployment) Rollback(ctx context.Context) error {
-	d.mu.Lock()
-	previous := d.previous
-	d.mu.Unlock()
-
-	if previous == "" {
-		return fmt.Errorf("%s: nothing to roll back to", d.Describe())
+// depends on revision history that may have been pruned. The caller already
+// knows the exact image it replaced, so it hands that back - the same mechanism
+// as any other deploy, and unambiguous about what it lands on.
+func (d *Deployment) Rollback(ctx context.Context, toImage string) error {
+	if toImage == "" {
+		return fmt.Errorf("%s: no image to roll back to", d.Describe())
 	}
-	return d.patchImage(ctx, previous)
+	return d.patchImage(ctx, toImage)
 }
 
 // patchImage sets the container's image with a strategic merge patch, so only

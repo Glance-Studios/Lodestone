@@ -28,8 +28,13 @@ type Target interface {
 	// an error if the rollout failed or timed out.
 	WaitSettled(ctx context.Context) error
 
-	// Rollback returns the target to its previous revision.
-	Rollback(ctx context.Context) error
+	// Rollback points the target back at toImage.
+	//
+	// The image to restore is a parameter rather than something the target
+	// remembers, so implementations hold no rollback state. State on the target
+	// would be shared between concurrent deploys, and the second deploy would
+	// overwrite the first one's memory of what to undo.
+	Rollback(ctx context.Context, toImage string) error
 }
 
 // Phase is where a rollout has reached.
@@ -156,7 +161,7 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 	err = target.WaitSettled(settleCtx)
 	cancelSettle()
 	if err != nil {
-		rollBack(ctx, target, emit, "rollout did not settle", err)
+		rollBack(ctx, target, previous, emit, "rollout did not settle", err)
 		return
 	}
 
@@ -167,7 +172,7 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 		err = health.WaitFor(healthCtx, opts.Checks, opts.healthInterval())
 		cancelHealth()
 		if err != nil {
-			rollBack(ctx, target, emit, "health checks failed", err)
+			rollBack(ctx, target, previous, emit, "health checks failed", err)
 			return
 		}
 	}
@@ -175,8 +180,8 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 	emit(PhaseSucceeded, "deployed "+digest, nil)
 }
 
-// rollBack returns the target to its previous revision and reports the outcome.
-func rollBack(ctx context.Context, target Target, emit func(Phase, string, error), why string, cause error) {
+// rollBack points the target back at previous and reports the outcome.
+func rollBack(ctx context.Context, target Target, previous string, emit func(Phase, string, error), why string, cause error) {
 	emit(PhaseRollingBck, why, cause)
 
 	// Roll back even if ctx is already done - the caller cancelling must not
@@ -184,7 +189,7 @@ func rollBack(ctx context.Context, target Target, emit func(Phase, string, error
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
 
-	if err := target.Rollback(rbCtx); err != nil {
+	if err := target.Rollback(rbCtx, previous); err != nil {
 		emit(PhaseFailed, "rollback failed: "+why, errors.Join(cause, err))
 		return
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Glance-Studios/Lodestone/internal/ledger"
@@ -25,6 +26,10 @@ type Server struct {
 	// Both nil unless deploying is configured; POST /deploy 501s without them.
 	packager Packager
 	deployer Deployer
+
+	// deployMu serialises deploys. Held for a whole deploy, so it is taken with
+	// TryLock and a second caller is refused rather than queued.
+	deployMu sync.Mutex
 }
 
 // Options are Server's dependencies. A struct rather than more positional

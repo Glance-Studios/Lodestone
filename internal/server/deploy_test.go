@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,6 +190,63 @@ func TestDeployNotConfiguredReports501(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("code = %d, want 501", rec.Code)
+	}
+}
+
+// A second deploy while one is in flight must be refused, not interleaved.
+// Interleaved deploys corrupt each other's rollback.
+func TestDeployRefusesConcurrentDeploys(t *testing.T) {
+	// Hold the first deploy inside the deployer until the test releases it.
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+
+	// Only the first call signals and blocks; later deploys in this test run
+	// straight through. sync.Once because the deployer is invoked more than once.
+	var first sync.Once
+	slowDeployer := func(ctx context.Context, digest string) <-chan rollout.Event {
+		ch := make(chan rollout.Event, 2)
+		go func() {
+			defer close(ch)
+			first.Do(func() {
+				close(inFlight)
+				<-release
+			})
+			ch <- rollout.Event{Phase: rollout.PhaseSucceeded, Message: "deployed", At: time.Now()}
+		}()
+		return ch
+	}
+
+	packager := &fakePackager{built: image.Built{Ref: "r@sha256:9", Digest: "sha256:9"}}
+	srv := deployServer(t, packager, slowDeployer)
+
+	// First deploy, in the background - it will block in the deployer.
+	firstDone := make(chan int, 1)
+	go func() {
+		rec := postDeploy(t, srv, "first jar")
+		firstDone <- rec.Code
+	}()
+
+	<-inFlight // the first deploy is definitely holding the lock
+
+	// Second deploy while the first is stuck.
+	second := postDeploy(t, srv, "second jar")
+	if second.Code != http.StatusLocked {
+		t.Errorf("concurrent deploy got %d, want %d", second.Code, http.StatusLocked)
+	}
+	if ra := second.Header().Get("Retry-After"); ra == "" {
+		t.Error("no Retry-After header on the refusal")
+	}
+
+	// Let the first finish, and confirm it succeeded.
+	close(release)
+	if code := <-firstDone; code != http.StatusOK {
+		t.Errorf("first deploy got %d, want 200", code)
+	}
+
+	// The lock must be released, so a later deploy works.
+	third := postDeploy(t, srv, "third jar")
+	if third.Code != http.StatusOK {
+		t.Errorf("deploy after the lock was released got %d, want 200", third.Code)
 	}
 }
 
