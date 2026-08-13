@@ -52,6 +52,11 @@ type Artifact struct {
 
 // LedgerEntry is one line of the ledger as served over HTTP.
 type LedgerEntry struct {
+	// Seq names this entry. Two entries can share every other field - the same jar
+	// republished onto a newer base - so this is the only way a client can say
+	// which one it means.
+	Seq uint64 `json:"seq"`
+
 	Digest    string    `json:"digest"`
 	Size      int64     `json:"size"`
 	Target    string    `json:"target,omitempty"`

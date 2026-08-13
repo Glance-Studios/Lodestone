@@ -15,6 +15,14 @@ import (
 
 // Entry is one line of the ledger: an artifact that was published.
 type Entry struct {
+	// Seq identifies this entry, assigned by Append and never reused.
+	//
+	// The digest cannot serve as an identity: the same artifact is legitimately
+	// published more than once - redeployed after a base image changes, say - and
+	// those are different entries with different images. Matching on digest marks
+	// all of them and overwrites the earlier one's image, orphaning its manifest.
+	Seq uint64 `json:"seq"`
+
 	Digest string `json:"digest"`
 	Size   int64  `json:"size"`
 
@@ -46,6 +54,7 @@ type Ledger struct {
 
 	mu      sync.Mutex
 	entries []Entry
+	nextSeq uint64
 }
 
 // Open loads the ledger at path, creating an empty one if the file is absent.
@@ -67,25 +76,82 @@ func Open(path string) (*Ledger, error) {
 	if err := json.Unmarshal(data, &l.entries); err != nil {
 		return nil, fmt.Errorf("decode ledger %s: %w", path, err)
 	}
+
+	// Continue the sequence past whatever is on disk, and backfill entries
+	// written before Seq existed so no two share an identity.
+	for _, e := range l.entries {
+		if e.Seq >= l.nextSeq {
+			l.nextSeq = e.Seq + 1
+		}
+	}
+	var migrated bool
+	for i := range l.entries {
+		if l.entries[i].Seq == 0 {
+			l.entries[i].Seq = l.nextSeq
+			l.nextSeq++
+			migrated = true
+		}
+	}
+	if migrated {
+		if err := l.save(); err != nil {
+			return nil, fmt.Errorf("assign sequence numbers in %s: %w", path, err)
+		}
+	}
+
 	return l, nil
 }
 
-// Append records an entry and persists the ledger. It stamps At if unset.
-func (l *Ledger) Append(e Entry) error {
+// Append records an entry and persists the ledger, returning the entry's Seq so
+// the caller can update exactly that entry later. It stamps At if unset.
+func (l *Ledger) Append(e Entry) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()
 	}
+	if l.nextSeq == 0 {
+		l.nextSeq = 1
+	}
+	e.Seq = l.nextSeq
+
 	l.entries = append(l.entries, e)
 
 	if err := l.save(); err != nil {
 		// Roll the in-memory state back so it keeps matching the file on disk.
 		l.entries = l.entries[:len(l.entries)-1]
-		return err
+		return 0, err
 	}
-	return nil
+
+	l.nextSeq++
+	return e.Seq, nil
+}
+
+// SetImage records what an entry was packaged into.
+//
+// Called as soon as the push succeeds, rather than only when a deploy succeeds:
+// a rolled-back deploy still pushed a manifest, and an entry that does not know
+// its image leaves that manifest unreclaimable forever.
+func (l *Ledger) SetImage(seq uint64, imageRef, baseRef string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for i := range l.entries {
+		if l.entries[i].Seq != seq {
+			continue
+		}
+
+		previous := l.entries[i]
+		l.entries[i].Image = imageRef
+		l.entries[i].BaseImage = baseRef
+
+		if err := l.save(); err != nil {
+			l.entries[i] = previous // keep memory consistent with disk
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("no ledger entry with seq %d", seq)
 }
 
 // Entries returns a copy of the ledger, newest first. A copy, because handing
@@ -101,34 +167,39 @@ func (l *Ledger) Entries() []Entry {
 	return out
 }
 
-// MarkDeployed records that a digest is the one now live, clearing the flag from
+// MarkDeployed records that one entry is the one now live, clearing the flag from
 // whatever held it before. Exactly one entry is deployed at a time.
 //
-// It reports whether the digest was found, so a caller can tell "recorded" from
-// "that digest is not in this ledger".
-func (l *Ledger) MarkDeployed(digest, imageRef, baseRef string) (bool, error) {
+// Identified by Seq rather than digest: the same artifact can appear more than
+// once, and matching on digest would mark every copy live and make all of them
+// immortal to pruning.
+func (l *Ledger) MarkDeployed(seq uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	found := false
+	// Check before mutating: clearing the flags and only then discovering there is
+	// nothing to set would leave memory disagreeing with the file on disk.
+	idx := -1
 	for i := range l.entries {
-		if l.entries[i].Digest == digest {
-			l.entries[i].Deployed = true
-			if imageRef != "" {
-				l.entries[i].Image = imageRef
-			}
-			if baseRef != "" {
-				l.entries[i].BaseImage = baseRef
-			}
-			found = true
-		} else {
-			l.entries[i].Deployed = false
+		if l.entries[i].Seq == seq {
+			idx = i
+			break
 		}
 	}
-	if !found {
-		return false, nil
+	if idx < 0 {
+		return fmt.Errorf("no ledger entry with seq %d", seq)
 	}
-	return true, l.save()
+
+	previous := slices.Clone(l.entries)
+	for i := range l.entries {
+		l.entries[i].Deployed = i == idx
+	}
+
+	if err := l.save(); err != nil {
+		l.entries = previous
+		return err
+	}
+	return nil
 }
 
 // Prune keeps the newest keep entries and drops the rest, returning the dropped

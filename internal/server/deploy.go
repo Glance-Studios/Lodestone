@@ -30,7 +30,7 @@ type Deployer func(ctx context.Context, imageRef string, replicas *int32) <-chan
 
 // handleUpload stores and records an artifact without deploying it.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, t *targetState) {
-	art, ok := s.receive(w, r, t, nil)
+	art, _, ok := s.receive(w, r, t, nil)
 	if !ok {
 		return
 	}
@@ -63,7 +63,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	}
 	defer t.mu.Unlock()
 
-	art, ok := s.receive(w, r, t, replicas)
+	art, seq, ok := s.receive(w, r, t, replicas)
 	if !ok {
 		return
 	}
@@ -88,12 +88,19 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 		return
 	}
 
+	// Record the manifest now, not after the rollout. The push has already
+	// happened, so the manifest exists whether or not the deploy sticks - and one
+	// the ledger never learned about can never be pruned.
+	if err := t.Ledger.SetImage(seq, built.Ref, built.BaseRef); err != nil {
+		fmt.Fprintf(os.Stderr, "lodestoned: record image for seq %d: %v\n", seq, err)
+	}
+
 	events := t.Deployer(r.Context(), built.Ref, replicas)
 	name := r.PathValue("target")
 
 	if wantsStream(r) {
 		deployed := streamDeploy(w, name, art.Digest, built, replicas, events)
-		s.afterDeploy(r.Context(), name, t, art.Digest, built, deployed)
+		s.afterDeploy(r.Context(), name, t, seq, deployed)
 		return
 	}
 
@@ -117,7 +124,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	}
 	writeResult(w, status, out)
 
-	s.afterDeploy(r.Context(), name, t, art.Digest, built, res.Succeeded())
+	s.afterDeploy(r.Context(), name, t, seq, res.Succeeded())
 }
 
 // afterDeploy records what is now live and trims the retention window.
@@ -126,12 +133,12 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 // and cannot turn a successful deploy into a failed one. It uses a context
 // detached from the request for the same reason: the client hanging up must not
 // abandon the ledger half-updated.
-func (s *Server) afterDeploy(ctx context.Context, name string, t *targetState, artifactDigest string, built image.Built, deployed bool) {
+func (s *Server) afterDeploy(ctx context.Context, name string, t *targetState, seq uint64, deployed bool) {
 	warn := func(msg string) { fmt.Fprintf(os.Stderr, "lodestoned: %s\n", msg) }
 
 	if deployed {
-		if _, err := t.Ledger.MarkDeployed(artifactDigest, built.Ref, built.BaseRef); err != nil {
-			warn(fmt.Sprintf("mark %s deployed: %v", artifactDigest, err))
+		if err := t.Ledger.MarkDeployed(seq); err != nil {
+			warn(fmt.Sprintf("mark seq %d deployed: %v", seq, err))
 		}
 	}
 
@@ -147,7 +154,7 @@ const pruneTimeout = 2 * time.Minute
 
 // receive stores the request body and records it in the target's ledger. It
 // writes its own error response and reports whether to continue.
-func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState, replicas *int32) (store.Artifact, bool) {
+func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState, replicas *int32) (store.Artifact, uint64, bool) {
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	defer body.Close()
 
@@ -158,14 +165,14 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			http.Error(w, "artifact too large", http.StatusRequestEntityTooLarge)
-			return store.Artifact{}, false
+			return store.Artifact{}, 0, false
 		}
 		http.Error(w, "storing artifact failed", http.StatusInternalServerError)
-		return store.Artifact{}, false
+		return store.Artifact{}, 0, false
 	}
 	if art.Size == 0 {
 		http.Error(w, "empty artifact", http.StatusBadRequest)
-		return store.Artifact{}, false
+		return store.Artifact{}, 0, false
 	}
 
 	// Reject anything that is not an archive, before it reaches the ledger. A
@@ -181,7 +188,7 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 			fmt.Fprintf(os.Stderr, "lodestoned: remove rejected artifact %s: %v\n", art.Digest, rmErr)
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return store.Artifact{}, false
+		return store.Artifact{}, 0, false
 	}
 
 	entry := ledger.Entry{
@@ -192,12 +199,13 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 		By:       r.URL.Query().Get("by"),
 		Replicas: replicas,
 	}
-	if err := t.Ledger.Append(entry); err != nil {
+	seq, err := t.Ledger.Append(entry)
+	if err != nil {
 		http.Error(w, "recording artifact failed", http.StatusInternalServerError)
-		return store.Artifact{}, false
+		return store.Artifact{}, 0, false
 	}
 
-	return art, true
+	return art, seq, true
 }
 
 // requestedReplicas reads ?replicas=N and checks it against the target's cap.

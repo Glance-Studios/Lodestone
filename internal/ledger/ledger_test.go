@@ -30,7 +30,7 @@ func TestOpenMissingFileIsEmpty(t *testing.T) {
 func TestAppendAndRead(t *testing.T) {
 	l, _ := newTestLedger(t)
 
-	if err := l.Append(Entry{Digest: "sha256:aaa", Size: 1, Version: "0.1.0", By: "cammy"}); err != nil {
+	if _, err := l.Append(Entry{Digest: "sha256:aaa", Size: 1, Version: "0.1.0", By: "cammy"}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestAppendAndRead(t *testing.T) {
 func TestPersistsAcrossReopen(t *testing.T) {
 	l, path := newTestLedger(t)
 
-	if err := l.Append(Entry{Digest: "sha256:bbb", Size: 2}); err != nil {
+	if _, err := l.Append(Entry{Digest: "sha256:bbb", Size: 2}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestEntriesNewestFirst(t *testing.T) {
 	// Appended oldest-first on purpose, so sorting has work to do.
 	for i, d := range []string{"sha256:old", "sha256:mid", "sha256:new"} {
 		e := Entry{Digest: d, At: base.Add(time.Duration(i) * time.Hour)}
-		if err := l.Append(e); err != nil {
+		if _, err := l.Append(e); err != nil {
 			t.Fatalf("Append() error = %v", err)
 		}
 	}
@@ -94,7 +94,7 @@ func TestEntriesNewestFirst(t *testing.T) {
 func TestEntriesReturnsACopy(t *testing.T) {
 	l, _ := newTestLedger(t)
 
-	if err := l.Append(Entry{Digest: "sha256:ccc"}); err != nil {
+	if _, err := l.Append(Entry{Digest: "sha256:ccc"}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestConcurrentAppends(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = l.Append(Entry{Digest: "sha256:", Size: int64(i)})
+			_, _ = l.Append(Entry{Digest: "sha256:", Size: int64(i)})
 		}()
 	}
 	wg.Wait()

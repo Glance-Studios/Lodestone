@@ -52,6 +52,78 @@ func deployN(t *testing.T, f *fixture, target, token string, n int) {
 
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
 
+// The same jar deployed twice - after the base image moved, so two different
+// manifests - must produce two independent entries.
+//
+// This is the leak that put five manifests in a repository configured to retain
+// three. The ledger used to identify an entry by its artifact digest, so the
+// second deploy of one jar marked both entries live and overwrote the first
+// one's image reference with the second's. Both were then immortal to pruning,
+// and the manifest the first had actually been built as was unreachable.
+func TestRedeployingOneJarKeepsSeparateEntries(t *testing.T) {
+	f := newFixtureWithRetain(t, 3)
+	f.devPackager.movingBase = true
+
+	const jar = "the same jar both times"
+	for _, version := range []string{"0.1.0", "0.1.1"} {
+		rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?version="+version, devToken, jar)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("deploy %s got %d (body %s)", version, rec.Code, rec.Body)
+		}
+	}
+
+	entries := f.devLedger.Entries() // newest first
+	if len(entries) != 2 {
+		t.Fatalf("ledger has %d entries, want 2 - one per deploy", len(entries))
+	}
+	if entries[0].Digest != entries[1].Digest {
+		t.Fatalf("the two deploys did not share an artifact digest; the test is not exercising the bug")
+	}
+
+	var live int
+	for _, e := range entries {
+		if e.Deployed {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Errorf("%d entries marked deployed, want exactly 1 - a stale live entry can never be pruned", live)
+	}
+	if !entries[0].Deployed {
+		t.Error("the newer deploy is not the one marked live")
+	}
+
+	if entries[0].Image == entries[1].Image {
+		t.Errorf("both entries record image %q; the older one's manifest is now unreclaimable", entries[0].Image)
+	}
+	if entries[1].BaseImage == entries[0].BaseImage {
+		t.Error("both entries record the same base; the older one no longer says what it was built on")
+	}
+}
+
+// A deploy that was rolled back still pushed a manifest, so the ledger has to
+// record it - otherwise pruning has no reference to delete and the manifest
+// stays in the registry forever.
+func TestRolledBackDeployStillRecordsItsManifest(t *testing.T) {
+	f := newFixtureWith(t, false, true) // dev rolls back
+
+	rec := f.do(t, http.MethodPost, "/deploy/dev-lobby?version=1.0.0", devToken, "a jar that fails health checks")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("code = %d, want 409", rec.Code)
+	}
+
+	entries := f.devLedger.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("ledger has %d entries, want 1", len(entries))
+	}
+	if entries[0].Deployed {
+		t.Error("a rolled-back deploy is marked deployed")
+	}
+	if entries[0].Image == "" {
+		t.Error("no image recorded for a rolled-back deploy; its manifest can never be pruned")
+	}
+}
+
 // Pruning trims the ledger to the retention window.
 func TestPruneTrimsTheLedger(t *testing.T) {
 	f := newFixtureWithRetain(t, 3)

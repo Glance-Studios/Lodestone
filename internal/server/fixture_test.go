@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -88,6 +89,10 @@ type uniquePackager struct {
 	n      int
 	err    error
 
+	// movingBase makes the image vary per call even for identical bytes, the way
+	// the real packager does once the base tag has moved underneath it.
+	movingBase bool
+
 	gotBytes string
 }
 
@@ -104,10 +109,20 @@ func (p *uniquePackager) Package(ctx context.Context, r io.Reader) (image.Built,
 
 	// Derive the image digest from the artifact bytes, so identical uploads yield
 	// identical images - as the real packager does.
-	sum := sha256.Sum256(b)
+	seed := b
+	if p.movingBase {
+		seed = append(append([]byte(nil), b...), byte('0'+p.n))
+	}
+	sum := sha256.Sum256(seed)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
+
+	base := p.prefix + "-base@sha256:basebasebase"
+	if p.movingBase {
+		base = fmt.Sprintf("%s-base@sha256:base%d", p.prefix, p.n)
+	}
+
 	p.n++
-	return image.Built{Ref: p.prefix + "@" + digest, Digest: digest, BaseRef: p.prefix + "-base@sha256:basebasebase"}, nil
+	return image.Built{Ref: p.prefix + "@" + digest, Digest: digest, BaseRef: base}, nil
 }
 
 // fixture is a server with two targets, dev and prod, each with its own token,
