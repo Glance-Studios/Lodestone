@@ -20,6 +20,7 @@ type fakeTarget struct {
 	setTo    []string // every digest SetImage was called with
 	rolled   int      // how many times Rollback was called
 	rolledTo []string // every image Rollback was asked to restore
+	scaledTo []int32  // every replica count SetImageAndReplicas was given
 	settleFn func(ctx context.Context) error
 
 	setErr      error
@@ -47,6 +48,24 @@ func (f *fakeTarget) SetImage(ctx context.Context, digest string) error {
 	f.setTo = append(f.setTo, digest)
 	f.current = digest
 	return nil
+}
+
+func (f *fakeTarget) SetImageAndReplicas(ctx context.Context, digest string, replicas int32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.setTo = append(f.setTo, digest)
+	f.current = digest
+	f.scaledTo = append(f.scaledTo, replicas)
+	return nil
+}
+
+func (f *fakeTarget) scaleCalls() []int32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int32(nil), f.scaledTo...)
 }
 
 func (f *fakeTarget) WaitSettled(ctx context.Context) error {
@@ -166,6 +185,81 @@ func TestDeploySameDigestIsNoOp(t *testing.T) {
 	}
 	if len(target.setTo) != 0 {
 		t.Errorf("SetImage was called %v, want no call for an unchanged digest", target.setTo)
+	}
+}
+
+// -- replica count as a deploy parameter --------------------------------------
+
+func int32p(n int32) *int32 { return &n }
+
+// Image and replica count must move in one patch, so the controller starts a
+// single rollout that already knows both.
+func TestDeployWithReplicaCount(t *testing.T) {
+	target := &fakeTarget{current: "sha256:old"}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{
+		Replicas: int32p(3),
+	}))
+
+	if !res.Succeeded() {
+		t.Fatalf("Succeeded() = false, err = %v", res.Err)
+	}
+	if got := target.scaleCalls(); len(got) != 1 || got[0] != 3 {
+		t.Errorf("scale calls = %v, want [3]", got)
+	}
+	// One call, not a SetImage followed by a scale.
+	if got := target.setTo; len(got) != 1 {
+		t.Errorf("SetImage-ish calls = %v, want exactly one", got)
+	}
+}
+
+func TestDeployWithoutReplicaCountDoesNotScale(t *testing.T) {
+	target := &fakeTarget{current: "sha256:old"}
+
+	Collect(Deploy(context.Background(), target, "sha256:new", Options{}))
+
+	if got := target.scaleCalls(); len(got) != 0 {
+		t.Errorf("scaled to %v, want no scaling when Replicas is nil", got)
+	}
+}
+
+// "Same jar, three instances for load testing" must not be short-circuited by
+// the already-running-this-digest check.
+func TestDeploySameDigestStillScales(t *testing.T) {
+	target := &fakeTarget{current: "sha256:same"}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:same", Options{
+		Replicas: int32p(3),
+	}))
+
+	if !res.Succeeded() {
+		t.Fatalf("Succeeded() = false, err = %v", res.Err)
+	}
+	if got := target.scaleCalls(); len(got) != 1 || got[0] != 3 {
+		t.Errorf("scale calls = %v, want [3] - a scale-only deploy must still apply", got)
+	}
+}
+
+// A rollback undoes the code, not a capacity decision.
+func TestRollbackDoesNotRestoreReplicaCount(t *testing.T) {
+	target := &fakeTarget{
+		current:  "sha256:old",
+		settleFn: func(ctx context.Context) error { return errors.New("crashloop") },
+	}
+
+	res := Collect(Deploy(context.Background(), target, "sha256:new", Options{
+		Replicas: int32p(4),
+	}))
+
+	if res.Succeeded() {
+		t.Fatal("Succeeded() = true, want failure")
+	}
+	// Scaled once going in, and not scaled again on the way out.
+	if got := target.scaleCalls(); len(got) != 1 {
+		t.Errorf("scale calls = %v, want exactly one - the rollback must not rescale", got)
+	}
+	if got := target.rollbackTargets(); len(got) != 1 || got[0] != "sha256:old" {
+		t.Errorf("rolled back to %v, want [sha256:old]", got)
 	}
 }
 

@@ -228,6 +228,21 @@ healthy deploy. A second concurrent deploy gets `423 Locked` and a `Retry-After`
 **The agent never executes the artifact.** It receives, packages, and hands a reference to Kubernetes.
 A malicious artifact compromises the pod it runs in, never the agent or the cluster.
 
+## What Lodestone is not
+
+**Lodestone ships new code to a fixed workload. It does not do dynamic provisioning** - creating and
+destroying an instance per player group, per session, or per tenant. That is a separate concern, and
+if you need it, Agones is the tool.
+
+The line is: *"how many replicas of an existing target"* is a deploy parameter Lodestone accepts.
+*"What targets exist"* is a manifest you apply yourself. Lodestone addresses many targets and manages
+none of them.
+
+**Draining is also not Lodestone's job.** A workload that needs to shut down gracefully does it with
+`preStop` and `terminationGracePeriodSeconds` in its own pod spec. Lodestone's only obligations are to
+make the rollout timeout configurable and to never mistake a terminating pod for a failed rollout - a
+pod that legitimately drains for two minutes is not a rollback trigger.
+
 ## Development
 
 ```bash

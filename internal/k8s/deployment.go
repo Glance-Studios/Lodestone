@@ -63,7 +63,27 @@ func (d *Deployment) Current(ctx context.Context) (string, error) {
 
 // SetImage points the container at image, starting a rollout.
 func (d *Deployment) SetImage(ctx context.Context, image string) error {
-	return d.patchImage(ctx, image)
+	return d.patch(ctx, image, nil)
+}
+
+// SetImageAndReplicas points the container at image and scales to replicas in a
+// single patch, so the rollout the controller starts already knows both. Two
+// separate patches would begin one rollout and then supersede it, which reads as
+// a stuck deploy while it happens.
+func (d *Deployment) SetImageAndReplicas(ctx context.Context, image string, replicas int32) error {
+	return d.patch(ctx, image, &replicas)
+}
+
+// Replicas reports the target's current desired replica count.
+func (d *Deployment) Replicas(ctx context.Context) (int32, error) {
+	dep, err := d.get(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if dep.Spec.Replicas == nil {
+		return 1, nil // nil means the Kubernetes default
+	}
+	return *dep.Spec.Replicas, nil
 }
 
 // Rollback points the container back at toImage.
@@ -73,29 +93,36 @@ func (d *Deployment) SetImage(ctx context.Context, image string) error {
 // depends on revision history that may have been pruned. The caller already
 // knows the exact image it replaced, so it hands that back - the same mechanism
 // as any other deploy, and unambiguous about what it lands on.
+//
+// Replica count is deliberately not restored. A rollback undoes the code that
+// broke, not a capacity decision someone made on purpose.
 func (d *Deployment) Rollback(ctx context.Context, toImage string) error {
 	if toImage == "" {
 		return fmt.Errorf("%s: no image to roll back to", d.Describe())
 	}
-	return d.patchImage(ctx, toImage)
+	return d.patch(ctx, toImage, nil)
 }
 
-// patchImage sets the container's image with a strategic merge patch, so only
-// that one field is sent and concurrent edits elsewhere are not clobbered.
-func (d *Deployment) patchImage(ctx context.Context, image string) error {
-	// Built with json.Marshal rather than string formatting, so an image
-	// reference containing anything awkward cannot break the document.
-	patch, err := json.Marshal(map[string]any{
-		"spec": map[string]any{
-			"template": map[string]any{
-				"spec": map[string]any{
-					"containers": []map[string]any{
-						{"name": d.container, "image": image},
-					},
+// patch sets the container's image, and optionally the replica count, with a
+// strategic merge patch - so only those fields are sent and concurrent edits
+// elsewhere are not clobbered.
+func (d *Deployment) patch(ctx context.Context, image string, replicas *int32) error {
+	spec := map[string]any{
+		"template": map[string]any{
+			"spec": map[string]any{
+				"containers": []map[string]any{
+					{"name": d.container, "image": image},
 				},
 			},
 		},
-	})
+	}
+	if replicas != nil {
+		spec["replicas"] = *replicas
+	}
+
+	// Built with json.Marshal rather than string formatting, so an image
+	// reference containing anything awkward cannot break the document.
+	patch, err := json.Marshal(map[string]any{"spec": spec})
 	if err != nil {
 		return fmt.Errorf("build patch: %w", err)
 	}
@@ -168,9 +195,23 @@ func (d *Deployment) WaitSettled(ctx context.Context) error {
 }
 
 // settled reports whether the rollout has finished, or an error if it failed.
+//
+// "Finished" means the desired number of *new* pods are up and available. It
+// deliberately does not wait for old pods to disappear.
+//
+// Status.Replicas counts terminating pods, so requiring it to equal the desired
+// count would block for the whole drain - and a workload that saves state on
+// SIGTERM can legitimately take minutes. Waiting would burn the settle timeout
+// and roll back a perfectly good deploy. Scaling down makes this routine rather
+// than rare, so the check is on updated-and-available only.
+//
+// The trade: success can be reported while old pods are still draining. That is
+// the right call for a deploy tool - the new version is live at full strength,
+// and the health gate confirms it separately.
 func settled(dep *appsv1.Deployment) (bool, error) {
 	// A Progressing=False/ProgressDeadlineExceeded condition is Kubernetes
-	// telling us it has given up. Detect it before declaring success.
+	// telling us it has given up. That is the authoritative failure signal, and
+	// the only one - our own timeout means "we stopped watching", not "it broke".
 	for _, c := range dep.Status.Conditions {
 		if c.Type == appsv1.DeploymentProgressing &&
 			c.Status == corev1.ConditionFalse &&
@@ -193,6 +234,5 @@ func settled(dep *appsv1.Deployment) (bool, error) {
 	}
 
 	return dep.Status.UpdatedReplicas == want &&
-		dep.Status.Replicas == want &&
 		dep.Status.AvailableReplicas == want, nil
 }

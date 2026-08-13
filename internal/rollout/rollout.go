@@ -24,6 +24,10 @@ type Target interface {
 	// SetImage points the target at digest, starting a rollout.
 	SetImage(ctx context.Context, digest string) error
 
+	// SetImageAndReplicas does the same and scales to replicas at once, so the
+	// controller starts a single rollout that already knows both.
+	SetImageAndReplicas(ctx context.Context, digest string, replicas int32) error
+
 	// WaitSettled blocks until the rollout finishes or ctx is done. It reports
 	// an error if the rollout failed or timed out.
 	WaitSettled(ctx context.Context) error
@@ -71,6 +75,11 @@ type Options struct {
 
 	// Checks gate the rollout. Empty means the rollout succeeds once settled.
 	Checks []health.Check
+
+	// Replicas scales the target as part of this deploy. Nil leaves the count
+	// alone, which is the common case; a developer choosing 1 for a UI change or
+	// 3 for load testing sets it.
+	Replicas *int32
 }
 
 func (o Options) settleTimeout() time.Duration {
@@ -142,13 +151,23 @@ func run(ctx context.Context, target Target, digest string, opts Options, events
 		emit(PhaseFailed, "could not read current image", err)
 		return
 	}
-	if previous == digest {
+	// Redeploying the digest already running is a no-op - unless a replica count
+	// was asked for, because "same jar, three instances for load testing" is a
+	// real request and must not be short-circuited away. Patching an unchanged
+	// spec does not bump the generation, so the redundant case settles at once.
+	if previous == digest && opts.Replicas == nil {
 		emit(PhaseSucceeded, "already running "+digest, nil)
 		return
 	}
 
-	emit(PhaseUpdating, fmt.Sprintf("replacing %s", previous), nil)
-	if err := target.SetImage(ctx, digest); err != nil {
+	if opts.Replicas != nil {
+		emit(PhaseUpdating, fmt.Sprintf("replacing %s, scaling to %d", previous, *opts.Replicas), nil)
+		err = target.SetImageAndReplicas(ctx, digest, *opts.Replicas)
+	} else {
+		emit(PhaseUpdating, fmt.Sprintf("replacing %s", previous), nil)
+		err = target.SetImage(ctx, digest)
+	}
+	if err != nil {
 		emit(PhaseFailed, "could not set image", err)
 		return
 	}

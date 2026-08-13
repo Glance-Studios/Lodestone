@@ -176,6 +176,37 @@ func TestSettled(t *testing.T) {
 			},
 		},
 		{
+			// The requirement: a pod draining on SIGTERM must not look like a
+			// stuck rollout. Status.Replicas stays high while old pods terminate,
+			// and a Paper server saving worlds can take minutes over it.
+			name: "old pods still terminating does not block",
+			mutate: func(d *appsv1.Deployment) {
+				d.Status.Replicas = 6 // 3 new + 3 draining
+			},
+			wantDone: true,
+		},
+		{
+			// Scaling 3 -> 1: the one new pod is up, two old ones are draining.
+			name: "scale down with draining pods is settled",
+			mutate: func(d *appsv1.Deployment) {
+				d.Spec.Replicas = int32p(1)
+				d.Status.UpdatedReplicas = 1
+				d.Status.AvailableReplicas = 1
+				d.Status.Replicas = 3 // two still terminating
+			},
+			wantDone: true,
+		},
+		{
+			// Scaling up is not settled until the new pods are actually available.
+			name: "scale up not finished",
+			mutate: func(d *appsv1.Deployment) {
+				d.Spec.Replicas = int32p(5)
+				d.Status.UpdatedReplicas = 5
+				d.Status.AvailableReplicas = 3 // two not ready yet
+				d.Status.Replicas = 5
+			},
+		},
+		{
 			name: "kubernetes gave up",
 			mutate: func(d *appsv1.Deployment) {
 				d.Status.Conditions = []appsv1.DeploymentCondition{{
