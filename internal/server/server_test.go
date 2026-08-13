@@ -112,8 +112,8 @@ func TestDeployWithoutTargetIs404(t *testing.T) {
 func TestLedgersAreIsolated(t *testing.T) {
 	f := newFixture(t)
 
-	f.do(t, http.MethodPost, "/artifacts/dev-lobby?version=1.0.0-dev&by=cammy", devToken, "dev jar")
-	f.do(t, http.MethodPost, "/artifacts/prod-lobby?version=1.0.0&by=ci", prodToken, "prod jar")
+	f.do(t, http.MethodPost, "/artifacts/dev-lobby?version=1.0.0-dev", devToken, "dev jar")
+	f.do(t, http.MethodPost, "/artifacts/prod-lobby?version=1.0.0-prod", prodToken, "prod jar")
 
 	dev := f.do(t, http.MethodGet, "/artifacts/dev-lobby", devToken, "")
 	prod := f.do(t, http.MethodGet, "/artifacts/prod-lobby", prodToken, "")
@@ -121,10 +121,10 @@ func TestLedgersAreIsolated(t *testing.T) {
 	if !strings.Contains(dev.Body.String(), "1.0.0-dev") {
 		t.Errorf("dev ledger missing its own entry: %s", dev.Body)
 	}
-	if strings.Contains(dev.Body.String(), `"by":"ci"`) {
+	if strings.Contains(dev.Body.String(), "1.0.0-prod") {
 		t.Error("the dev ledger contains prod's entry")
 	}
-	if !strings.Contains(prod.Body.String(), `"by":"ci"`) {
+	if !strings.Contains(prod.Body.String(), "1.0.0-prod") {
 		t.Errorf("prod ledger missing its own entry: %s", prod.Body)
 	}
 	if strings.Contains(prod.Body.String(), "1.0.0-dev") {

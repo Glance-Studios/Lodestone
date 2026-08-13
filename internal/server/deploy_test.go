@@ -381,7 +381,7 @@ func TestNonStreamingClientGetsOneObject(t *testing.T) {
 func TestDeployRecordsReplicasInTheLedger(t *testing.T) {
 	f := newFixture(t)
 
-	f.do(t, http.MethodPost, "/deploy/dev-lobby?version=2.0.0&by=cammy&replicas=3", devToken, "jar")
+	f.do(t, http.MethodPost, "/deploy/dev-lobby?version=2.0.0&replicas=3", devToken, "jar")
 
 	entries := f.devLedger.Entries()
 	if len(entries) != 1 {
@@ -389,7 +389,8 @@ func TestDeployRecordsReplicasInTheLedger(t *testing.T) {
 	}
 
 	e := entries[0]
-	if e.Version != "2.0.0" || e.By != "cammy" {
+	// By comes from the credential, not the request - see credential_test.go.
+	if e.Version != "2.0.0" || e.By != target.SharedCredential {
 		t.Errorf("entry = %+v", e)
 	}
 	if e.Replicas == nil || *e.Replicas != 3 {

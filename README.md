@@ -23,7 +23,7 @@ POST /deploy  ──▶  store the artifact by content digest
 
 **Working prototype, verified against real infrastructure.** The pipeline above runs end to end: a
 plugin jar deployed onto a live Paper server on k3s, digest-pinned, with the health gate passing on a
-TCP probe - and a real automatic rollback with zero downtime when a rollout stalled. 187 tests pass
+TCP probe - and a real automatic rollback with zero downtime when a rollout stalled. 212 tests pass
 under `-race`.
 
 Not yet built, and designed but absent: environment scopes (dev/staging/prod), promotion between them,
@@ -74,7 +74,10 @@ map:
       "baseImage":     "localhost:5000/hideaway/lobby-base:current",
       "repo":          "localhost:5000/dev/lobby",
       "destPath":      "/plugins/app.jar",
-      "tokenEnv":      "LODESTONE_TOKEN_DEV_LOBBY",
+      "credentials": [
+        { "name": "cammy", "env": "LODESTONE_TOKEN_DEV_LOBBY_CAMMY" },
+        { "name": "ci",    "env": "LODESTONE_TOKEN_DEV_LOBBY_CI" }
+      ],
       "healthAddr":    "127.0.0.1:25565",
       "settleTimeout": "12m",
       "maxReplicas":   4
@@ -83,9 +86,21 @@ map:
 }
 ```
 
-`namespace`, `deployment`, `container`, `baseImage` and `repo` are required. Prefer **`tokenEnv`** -
-naming an environment variable - over a literal `token`, so the file can live in a ConfigMap and the
-secret in a Secret. A missing variable fails at startup rather than on someone's first deploy.
+`namespace`, `deployment`, `container`, `baseImage` and `repo` are required.
+
+**Credentials are identities, not just secrets.** Each one names who is deploying, and that name -
+not anything the request claims - is what the ledger records. Give every person and every automation
+its own, because the alternative costs you three things: you cannot tell who deployed, you cannot
+revoke one person without rotating the secret for everyone, and a leak gives you no idea whose it was.
+Prefer **`env`** over a literal `token` so the file can live in a ConfigMap and the secrets in a
+Secret; a missing variable fails at startup rather than on someone's first deploy.
+
+Two credentials may not share a token, and two may not share a name - either would make a deploy
+impossible to attribute.
+
+The older single-token form (`token` / `tokenEnv`, exclusive with `credentials`) still works and is
+recorded as **`shared`**. That is deliberate: a secret several people hold cannot identify any of
+them, and the ledger should say so rather than name a suspect.
 
 Set **`settleTimeout` longer than the Deployment's `progressDeadlineSeconds`**, so Kubernetes gets to
 report *why* a rollout failed before Lodestone stops watching. `maxReplicas` caps what one deploy may
@@ -98,7 +113,8 @@ export LODESTONE_DATA_DIR=/var/lib/lodestone
 export LODESTONE_TARGETS=/etc/lodestone/targets.json
 export LODESTONE_KUBECONFIG=/etc/rancher/k3s/k3s.yaml   # unset = in-cluster
 
-export LODESTONE_TOKEN_DEV_LOBBY=$(openssl rand -hex 32)
+export LODESTONE_TOKEN_DEV_LOBBY_CAMMY=$(openssl rand -hex 32)
+export LODESTONE_TOKEN_DEV_LOBBY_CI=$(openssl rand -hex 32)
 
 lodestoned
 ```
@@ -108,12 +124,11 @@ install. Run `lodestoned -help` for the full reference.
 
 ### 3. Point the CLI at it
 
-Each target has its own token, so a context pairs an address, a token and the target that token
-reaches:
+Each credential reaches exactly one target, so a context pairs an address, a token and that target:
 
 ```bash
 lodestone login dev --api https://lodestone.example.com \
-                    --token "$LODESTONE_TOKEN_DEV_LOBBY" \
+                    --token "$LODESTONE_TOKEN_DEV_LOBBY_CAMMY" \
                     --target dev-lobby
 lodestone status
 ```
@@ -211,8 +226,8 @@ file, because a map does not fit in an environment variable.
 | `LODESTONE_TARGETS` | - | path to the targets JSON. Unset means `/status` only |
 | `LODESTONE_KUBECONFIG` | - | unset means in-cluster, then the usual rules |
 
-Plus one variable per target naming its token, if you use `tokenEnv` - e.g.
-`LODESTONE_TOKEN_DEV_LOBBY`.
+Plus one variable per credential holding its token - e.g.
+`LODESTONE_TOKEN_DEV_LOBBY_CAMMY`, or `LODESTONE_TOKEN_DEV_LOBBY` for the single-token form.
 
 ### Target fields
 
@@ -224,8 +239,9 @@ Plus one variable per target naming its token, if you use `tokenEnv` - e.g.
 | `baseImage` | **required** | image to append artifacts onto |
 | `repo` | **required** | registry path to push builds to |
 | `destPath` | `/plugins/app.jar` | where the artifact lands inside the image |
-| `tokenEnv` | - | environment variable holding this target's token |
-| `token` | - | literal token, for local use. Exclusive with `tokenEnv` |
+| `credentials` | - | named tokens permitted to deploy. `name` is recorded in the ledger; `env` names the variable holding the secret, or `token` is a literal |
+| `tokenEnv` | - | single shared token from the environment. Recorded as `shared`. Exclusive with `credentials` |
+| `token` | - | literal single token, for local use. Exclusive with `tokenEnv` and `credentials` |
 | `healthURL` | - | HTTP GET must return 2xx |
 | `healthAddr` | - | TCP connect must succeed (`host:port`) |
 | `settleTimeout` | `10m` | how long to watch a rollout. Set above `progressDeadlineSeconds` |
@@ -266,7 +282,7 @@ distinct bases your retained manifests still reference.
 | | | |
 |---|---|---|
 | `GET` | `/status` | public - health probes need it without a token. Reports the target names |
-| `POST` | `/artifacts/{target}` | upload and record. `?version=` `&by=` stamp the ledger |
+| `POST` | `/artifacts/{target}` | upload and record. `?version=` stamps the ledger |
 | `GET` | `/artifacts/{target}` | read that target's ledger, newest first |
 | `POST` | `/deploy/{target}` | the whole pipeline. Also accepts `?replicas=` |
 

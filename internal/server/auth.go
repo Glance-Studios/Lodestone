@@ -1,18 +1,22 @@
 package server
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"strings"
 
 	"github.com/Glance-Studios/Lodestone/internal/target"
 )
 
-// targetHandler is a handler that has already been resolved to a target.
-type targetHandler func(w http.ResponseWriter, r *http.Request, t *targetState)
+// targetHandler is a handler that has already been resolved to a target and to
+// the credential that authenticated the request.
+//
+// The identity is passed as an argument rather than stashed in the request
+// context: a handler that records who deployed must not be able to compile
+// without it.
+type targetHandler func(w http.ResponseWriter, r *http.Request, t *targetState, by string)
 
 // requireTargetToken resolves {target} from the path and checks the bearer token
-// against that target's own token.
+// against that target's own credentials.
 //
 // Auth cannot come before resolution, because which token is correct depends on
 // which target is addressed - that is what makes a dev credential unable to
@@ -39,24 +43,15 @@ func (s *Server) requireTargetToken(next targetHandler) http.Handler {
 			return
 		}
 
-		if !tokenValid(t.Config.Token, bearerToken(r)) {
+		by, ok := t.Config.Authenticate(bearerToken(r))
+		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		next(w, r, t)
+		next(w, r, t, by)
 	})
-}
-
-// tokenValid reports whether got equals expected, compared in constant time so
-// the check leaks no timing information about the token.
-// An empty expected token is never valid.
-func tokenValid(expected, got string) bool {
-	if expected == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(got)) == 1
 }
 
 // bearerToken returns the token from an "Authorization: Bearer <token>" header,

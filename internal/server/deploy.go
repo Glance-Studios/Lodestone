@@ -29,8 +29,8 @@ type Packager interface {
 type Deployer func(ctx context.Context, imageRef string, replicas *int32) <-chan rollout.Event
 
 // handleUpload stores and records an artifact without deploying it.
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, t *targetState) {
-	art, _, ok := s.receive(w, r, t, nil)
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, t *targetState, by string) {
+	art, _, ok := s.receive(w, r, t, nil, by)
 	if !ok {
 		return
 	}
@@ -42,7 +42,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, t *targetS
 
 // handleDeploy accepts an artifact, packages it into an image, pushes it, and
 // rolls the target onto it - the whole pipeline in one request.
-func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetState) {
+func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetState, by string) {
 	if t.Packager == nil || t.Deployer == nil {
 		http.Error(w, "this target cannot deploy", http.StatusNotImplemented)
 		return
@@ -63,7 +63,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	}
 	defer t.mu.Unlock()
 
-	art, seq, ok := s.receive(w, r, t, replicas)
+	art, seq, ok := s.receive(w, r, t, replicas, by)
 	if !ok {
 		return
 	}
@@ -154,7 +154,7 @@ const pruneTimeout = 2 * time.Minute
 
 // receive stores the request body and records it in the target's ledger. It
 // writes its own error response and reports whether to continue.
-func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState, replicas *int32) (store.Artifact, uint64, bool) {
+func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState, replicas *int32, by string) (store.Artifact, uint64, bool) {
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	defer body.Close()
 
@@ -196,7 +196,7 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 		Size:     art.Size,
 		Target:   r.PathValue("target"),
 		Version:  r.URL.Query().Get("version"),
-		By:       r.URL.Query().Get("by"),
+		By:       by,
 		Replicas: replicas,
 	}
 	seq, err := t.Ledger.Append(entry)

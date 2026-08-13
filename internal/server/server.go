@@ -103,7 +103,7 @@ func (s *Server) TargetNames() []string {
 }
 
 // handleListArtifacts returns one target's ledger, newest first.
-func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request, t *targetState) {
+func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request, t *targetState, _ string) {
 	entries := t.Ledger.Entries()
 
 	out := make([]api.LedgerEntry, 0, len(entries))
