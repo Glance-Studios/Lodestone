@@ -436,17 +436,41 @@ func TestDeployMissingFile(t *testing.T) {
 	}
 }
 
-// The upload metadata comes from the environment, so CI can label its deploys.
-func TestPushStampsMetadata(t *testing.T) {
+// LODESTONE_VERSION labels the ledger entry, so CI can stamp a build.
+func TestPushStampsVersion(t *testing.T) {
 	isolate(t)
 	t.Setenv("LODESTONE_VERSION", "4.5.6")
-	t.Setenv("LODESTONE_BY", "ci-runner")
 
 	jar := writeJar(t, "jar")
 
-	var gotVersion, gotBy string
+	var gotVersion string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotVersion = r.URL.Query().Get("version")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"digest":"sha256:abc","size":3}`)
+	}))
+	defer srv.Close()
+
+	if got := run(t, "push", jar, "--api", srv.URL, "--target", "dev-lobby"); got.code != ExitOK {
+		t.Fatalf("code = %d, stderr %q", got.code, got.err)
+	}
+	if gotVersion != "4.5.6" {
+		t.Errorf("version=%q, want 4.5.6", gotVersion)
+	}
+}
+
+// Who deployed is not the client's to say. The server derives it from the
+// credential, so the CLI must not offer a way to influence it - a knob that
+// looks like it sets attribution but does not is worse than no knob.
+func TestClientSendsNoIdentity(t *testing.T) {
+	isolate(t)
+	t.Setenv("LODESTONE_BY", "someone-else")
+	t.Setenv("USER", "someone-else")
+
+	jar := writeJar(t, "jar")
+
+	var gotBy string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBy = r.URL.Query().Get("by")
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"digest":"sha256:abc","size":3}`)
@@ -456,8 +480,8 @@ func TestPushStampsMetadata(t *testing.T) {
 	if got := run(t, "push", jar, "--api", srv.URL, "--target", "dev-lobby"); got.code != ExitOK {
 		t.Fatalf("code = %d, stderr %q", got.code, got.err)
 	}
-	if gotVersion != "4.5.6" || gotBy != "ci-runner" {
-		t.Errorf("version=%q by=%q, want 4.5.6/ci-runner", gotVersion, gotBy)
+	if gotBy != "" {
+		t.Errorf("by=%q, want no identity sent at all", gotBy)
 	}
 }
 

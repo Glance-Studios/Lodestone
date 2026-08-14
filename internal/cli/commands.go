@@ -119,7 +119,6 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 
 	opts := UploadOptions{
 		Version:  os.Getenv("LODESTONE_VERSION"),
-		By:       whoami(),
 		Replicas: g.replicas(),
 	}
 
@@ -204,7 +203,6 @@ func runPush(ctx context.Context, env Env, g Globals, args []string) error {
 
 	art, err := client.Push(ctx, name, f, UploadOptions{
 		Version: os.Getenv("LODESTONE_VERSION"),
-		By:      whoami(),
 	})
 	if err != nil {
 		return err
@@ -250,19 +248,34 @@ func runLedger(ctx context.Context, env Env, g Globals, args []string) error {
 		return nil
 	}
 
-	fmt.Fprintf(env.Out, "%-19s  %-12s  %-10s  %-8s  %s\n", "WHEN", "VERSION", "BY", "SIZE", "DIGEST")
+	fmt.Fprintf(env.Out, "%-19s  %-12s  %-12s  %-8s  %s\n", "WHEN", "VERSION", "BY", "SIZE", "DIGEST")
+
+	unproven := false
 	for _, e := range entries {
 		version := e.Version
 		if version == "" {
 			version = "-"
 		}
+
 		by := e.By
 		if by == "" {
 			by = "-"
 		}
-		fmt.Fprintf(env.Out, "%-19s  %-12s  %-10s  %-8s  %s\n",
+		// Marked with a character rather than colour, because this output gets
+		// pasted into tickets and messages at least as often as it is read in a
+		// terminal, and colour does not survive that.
+		if !e.Authenticated {
+			by += " (?)"
+			unproven = true
+		}
+
+		fmt.Fprintf(env.Out, "%-19s  %-12s  %-12s  %-8s  %s\n",
 			e.At.Local().Format("2006-01-02 15:04:05"),
 			version, by, humanSize(e.Size), shortDigest(e.Digest))
+	}
+
+	if unproven {
+		fmt.Fprintln(env.Out, "\n(?) who deployed was claimed by the caller, not proved by a credential")
 	}
 	return nil
 }
@@ -403,17 +416,6 @@ func writeJSON(w io.Writer, v any) error {
 		return fmt.Errorf("encode output: %w", err)
 	}
 	return nil
-}
-
-// whoami labels a ledger entry. LODESTONE_BY wins so CI can identify itself.
-func whoami() string {
-	if by := os.Getenv("LODESTONE_BY"); by != "" {
-		return by
-	}
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	return os.Getenv("USERNAME") // windows
 }
 
 func shortDigest(d string) string {

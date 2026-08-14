@@ -126,9 +126,11 @@ func (c *Client) Ledger(ctx context.Context, target string) ([]api.LedgerEntry, 
 
 // UploadOptions carries the metadata stamped onto a ledger entry, and the
 // replica count a deploy asks for.
+// Who deployed is deliberately absent: the server derives it from the
+// credential that authenticated the request, and ignores anything the client
+// claims. Sending it anyway would be a knob that quietly does nothing.
 type UploadOptions struct {
 	Version string
-	By      string
 
 	// Replicas scales the target as part of the deploy. Nil leaves it alone.
 	Replicas *int32
@@ -138,9 +140,6 @@ func (o UploadOptions) query() string {
 	q := url.Values{}
 	if o.Version != "" {
 		q.Set("version", o.Version)
-	}
-	if o.By != "" {
-		q.Set("by", o.By)
 	}
 	if o.Replicas != nil {
 		q.Set("replicas", strconv.FormatInt(int64(*o.Replicas), 10))

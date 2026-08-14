@@ -95,13 +95,19 @@ func TestPushSendsMetadataAsQuery(t *testing.T) {
 	})
 
 	got, err := c.Push(context.Background(), "dev-lobby", strings.NewReader("jar"),
-		UploadOptions{Version: "1.0.0", By: "cammy"})
+		UploadOptions{Version: "1.0.0"})
 	if err != nil {
 		t.Fatalf("Push() error = %v", err)
 	}
 
-	if gotVersion != "1.0.0" || gotBy != "cammy" {
-		t.Errorf("query version=%q by=%q, want 1.0.0/cammy", gotVersion, gotBy)
+	if gotVersion != "1.0.0" {
+		t.Errorf("query version=%q, want 1.0.0", gotVersion)
+	}
+	// The client must not send an identity at all. The server derives it from the
+	// credential, so a by= parameter is at best ignored and at worst read as
+	// something the caller can influence.
+	if gotBy != "" {
+		t.Errorf("query by=%q, want it not sent", gotBy)
 	}
 	if gotBody != "jar" {
 		t.Errorf("body = %q, want jar", gotBody)

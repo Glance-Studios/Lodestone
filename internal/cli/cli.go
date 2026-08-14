@@ -265,6 +265,8 @@ func printRootUsage(env Env, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "\nEnvironment:")
 	fmt.Fprintln(w, "  LODESTONE_API      server address; overrides the config file entirely")
 	fmt.Fprintln(w, "  LODESTONE_TOKEN    bearer token")
+	fmt.Fprintln(w, "  LODESTONE_TARGET   target name; used with LODESTONE_API")
+	fmt.Fprintln(w, "  LODESTONE_VERSION  version string stamped onto the ledger entry")
 	fmt.Fprintln(w, "  LODESTONE_CONFIG   config file path")
 	fmt.Fprintln(w, "\nRun `lodestone <command> -h` for a command's own help.")
 }
