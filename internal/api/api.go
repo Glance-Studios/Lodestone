@@ -57,16 +57,22 @@ type LedgerEntry struct {
 	// which one it means.
 	Seq uint64 `json:"seq"`
 
-	Digest    string    `json:"digest"`
-	Size      int64     `json:"size"`
-	Target    string    `json:"target,omitempty"`
-	Version   string    `json:"version,omitempty"`
-	By        string    `json:"by,omitempty"`
-	At        time.Time `json:"at"`
-	Replicas  *int32    `json:"replicas,omitempty"`
-	Deployed  bool      `json:"deployed"`
-	Image     string    `json:"image,omitempty"`
-	BaseImage string    `json:"baseImage,omitempty"`
+	Digest  string `json:"digest"`
+	Size    int64  `json:"size"`
+	Target  string `json:"target,omitempty"`
+	Version string `json:"version,omitempty"`
+	By      string `json:"by,omitempty"`
+
+	// Authenticated reports whether By was proved by a credential. False on
+	// entries written before named credentials existed, where By was whatever the
+	// caller claimed. Present in JSON output so tooling can check it, rather than
+	// only being visible as a marker in the rendered table.
+	Authenticated bool      `json:"authenticated"`
+	At            time.Time `json:"at"`
+	Replicas      *int32    `json:"replicas,omitempty"`
+	Deployed      bool      `json:"deployed"`
+	Image         string    `json:"image,omitempty"`
+	BaseImage     string    `json:"baseImage,omitempty"`
 }
 
 // Status is the body of GET /status.

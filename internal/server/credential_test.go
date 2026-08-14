@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Glance-Studios/Lodestone/internal/target"
@@ -120,5 +121,32 @@ func TestSingleTokenRecordsShared(t *testing.T) {
 
 	if got := f.devLedger.Entries()[0].By; got != target.SharedCredential {
 		t.Errorf("By = %q, want %q", got, target.SharedCredential)
+	}
+}
+
+// An entry written by the current agent is marked as proved, so an auditor can
+// tell it from a pre-credential row where By was merely claimed.
+func TestLedgerMarksEntriesAuthenticated(t *testing.T) {
+	f := newFixture(t)
+	withNamedCredentials(f, "dev-lobby")
+
+	f.do(t, http.MethodPost, "/artifacts/dev-lobby", cammyToken, "jar")
+
+	if !f.devLedger.Entries()[0].Authenticated {
+		t.Error("entry written by an authenticated request is not marked as such")
+	}
+}
+
+// The flag reaches the wire, so tooling can check attribution without scraping a
+// rendered table.
+func TestArtifactsListExposesAuthenticated(t *testing.T) {
+	f := newFixture(t)
+	withNamedCredentials(f, "dev-lobby")
+
+	f.do(t, http.MethodPost, "/artifacts/dev-lobby", cammyToken, "jar")
+
+	rec := f.do(t, http.MethodGet, "/artifacts/dev-lobby", cammyToken, "")
+	if !strings.Contains(rec.Body.String(), `"authenticated":true`) {
+		t.Errorf("listing omits the attribution flag: %s", rec.Body)
 	}
 }

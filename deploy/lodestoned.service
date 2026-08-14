@@ -1,0 +1,44 @@
+[Unit]
+Description=Lodestone deploy agent
+Documentation=https://github.com/Glance-Studios/Lodestone
+# The agent reads a kubeconfig at startup and pushes to a registry that may be a
+# container on this host. Ordering only - neither is a hard dependency, and After=
+# on a unit that does not exist is a no-op.
+After=network-online.target k3s.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# A symlink, not a versioned path: rollback is repointing it, which keeps the
+# unit file identical across upgrades.
+ExecStart=/usr/local/lib/lodestone/current
+
+EnvironmentFile=/etc/lodestone/lodestoned.env
+
+# A clean exit is the agent finishing a graceful shutdown, so only restart when
+# something actually went wrong. systemd's default start limit (5 attempts in
+# 10s) then stops a broken config from looping forever - a target file that fails
+# validation leaves the unit failed, which is what you want to see.
+Restart=on-failure
+RestartSec=5s
+
+# The agent waits up to 15 minutes for a rollout in flight before giving up, so
+# it must outlive systemd's default 90s stop timeout. Killing it early abandons a
+# half-applied rollout and logs nothing about why - the same trap as a pod's
+# terminationGracePeriodSeconds.
+TimeoutStopSec=960s
+KillSignal=SIGTERM
+
+# Hardening. ProtectHome makes /root inaccessible, which is exactly why the
+# binary lives under /usr/local/lib and the environment file under /etc.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

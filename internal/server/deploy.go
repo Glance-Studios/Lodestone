@@ -198,6 +198,10 @@ func (s *Server) receive(w http.ResponseWriter, r *http.Request, t *targetState,
 		Version:  r.URL.Query().Get("version"),
 		By:       by,
 		Replicas: replicas,
+
+		// By came from the credential that authenticated this request, not from
+		// anything the caller sent - so it is evidence, and says so.
+		Authenticated: true,
 	}
 	seq, err := t.Ledger.Append(entry)
 	if err != nil {

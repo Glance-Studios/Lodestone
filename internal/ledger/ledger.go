@@ -41,6 +41,17 @@ type Entry struct {
 	Deployed bool   `json:"deployed"`
 	Image    string `json:"image,omitempty"` // the pushed image, once packaged
 
+	// Authenticated reports whether By was proved by a credential rather than
+	// claimed by the caller.
+	//
+	// Entries written before named credentials existed took By from a query
+	// parameter, so anyone holding the target's token could write any name. Those
+	// decode with this field absent, which is false, which is the correct answer -
+	// but only by luck. Once anything other than the pre-cutover entries can
+	// produce false, that coincidence stops holding and this needs stating
+	// explicitly rather than inferring.
+	Authenticated bool `json:"authenticated"`
+
 	// BaseImage is the base this was appended onto, pinned by digest even when
 	// the target names a moving tag. Without it, "which world was this built on?"
 	// has no answer once the tag has moved.
