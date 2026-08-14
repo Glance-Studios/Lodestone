@@ -1,0 +1,12 @@
+[Unit]
+Description=Snapshot Lodestone ledgers and artifact store
+Documentation=https://github.com/Glance-Studios/Lodestone
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/lodestone/backup.sh
+
+# Reads the state directory and writes only to the backup directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true

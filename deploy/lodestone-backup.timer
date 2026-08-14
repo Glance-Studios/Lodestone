@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Lodestone state snapshot
+
+[Timer]
+OnCalendar=daily
+# Run a missed snapshot on the next boot rather than skipping the day - a host
+# that was off overnight is exactly when you want the backup to still happen.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
