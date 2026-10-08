@@ -31,6 +31,11 @@ type Target struct {
 	Repo      string `json:"repo"`
 	DestPath  string `json:"destPath,omitempty"`
 
+	// OverlayImage is optional: an image whose layers are appended between the
+	// base and the artifact on every deploy, for content that moves apart from
+	// both, such as a test server's model files. May be a moving tag.
+	OverlayImage string `json:"overlayImage,omitempty"`
+
 	// Credentials are the named tokens that may deploy to this target. Prefer
 	// these over Token: a named credential is an identity, so the ledger can
 	// record who deployed rather than who claimed to, and one person can be

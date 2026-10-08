@@ -25,6 +25,11 @@ type Packager struct {
 	// DestPath is where the artifact lands inside the image.
 	DestPath string
 
+	// Overlay, when set, names an image whose layers are appended between the
+	// base and the artifact, e.g. a test server's model files. Like Base it may
+	// be a moving tag, and it is resolved on every build.
+	Overlay string
+
 	// Keychain resolves registry credentials. Nil uses the ambient config -
 	// docker config.json, and cloud provider helpers.
 	Keychain authn.Keychain
@@ -55,6 +60,10 @@ type Built struct {
 	// was this built on?", and recording it is what makes a moving base tag
 	// acceptable rather than a hole in provenance.
 	BaseRef string `json:"baseRef"`
+
+	// OverlayRef is the overlay appended, pinned by digest for the same reason.
+	// Empty when the target has none.
+	OverlayRef string `json:"overlayRef,omitempty"`
 }
 
 func (p *Packager) keychain() authn.Keychain {
@@ -72,29 +81,12 @@ func (p *Packager) keychain() authn.Keychain {
 // as it was at startup, which is the mutable-tag problem this whole design
 // exists to avoid, one level up from the Deployment.
 func (p *Packager) base(ctx context.Context) (v1.Image, string, error) {
-	ref, err := name.ParseReference(p.Base)
+	pinned, err := p.pin(ctx, "base", p.Base)
 	if err != nil {
-		return nil, "", fmt.Errorf("parse base %q: %w", p.Base, err)
+		return nil, "", err
 	}
-
-	opts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(p.keychain()),
-	}
-
-	// A HEAD on the manifest, so resolving costs a request rather than a pull.
-	desc, err := remote.Head(ref, opts...)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve base %s: %w", p.Base, err)
-	}
-	digest := desc.Digest.String()
-
-	// Pin the reference to what we just resolved. Naming the repository from ref
-	// keeps any registry host and port intact.
-	pinned, err := name.NewDigest(ref.Context().Name() + "@" + digest)
-	if err != nil {
-		return nil, "", fmt.Errorf("pin base %s to %s: %w", p.Base, digest, err)
-	}
+	digest := pinned.DigestStr()
+	opts := p.remoteOptions(ctx)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -116,6 +108,54 @@ func (p *Packager) base(ctx context.Context) (v1.Image, string, error) {
 	return img, pinned.String(), nil
 }
 
+func (p *Packager) remoteOptions(ctx context.Context) []remote.Option {
+	return []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(p.keychain()),
+	}
+}
+
+// pin resolves image, which may be a moving tag, to the digest it names now.
+func (p *Packager) pin(ctx context.Context, role, image string) (name.Digest, error) {
+	ref, err := name.ParseReference(image)
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("parse %s %q: %w", role, image, err)
+	}
+
+	// A HEAD on the manifest, so resolving costs a request rather than a pull.
+	desc, err := remote.Head(ref, p.remoteOptions(ctx)...)
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("resolve %s %s: %w", role, image, err)
+	}
+	digest := desc.Digest.String()
+
+	// Pin the reference to what we just resolved. Naming the repository from ref
+	// keeps any registry host and port intact.
+	pinned, err := name.NewDigest(ref.Context().Name() + "@" + digest)
+	if err != nil {
+		return name.Digest{}, fmt.Errorf("pin %s %s to %s: %w", role, image, digest, err)
+	}
+	return pinned, nil
+}
+
+// overlay pulls the overlay's layers by the digest its tag names now. Not cached:
+// it is small, and it is the part expected to change between builds.
+func (p *Packager) overlay(ctx context.Context) ([]v1.Layer, string, error) {
+	pinned, err := p.pin(ctx, "overlay", p.Overlay)
+	if err != nil {
+		return nil, "", err
+	}
+	img, err := remote.Image(pinned, p.remoteOptions(ctx)...)
+	if err != nil {
+		return nil, "", fmt.Errorf("pull overlay %s: %w", pinned, err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, "", fmt.Errorf("read overlay %s: %w", pinned, err)
+	}
+	return layers, pinned.String(), nil
+}
+
 // Package appends the artifact read from r onto the base image and pushes the
 // result, returning the pushed digest.
 func (p *Packager) Package(ctx context.Context, r io.Reader) (Built, error) {
@@ -124,14 +164,25 @@ func (p *Packager) Package(ctx context.Context, r io.Reader) (Built, error) {
 		return Built{}, err
 	}
 
+	var layers []v1.Layer
+	overlayRef := ""
+	if p.Overlay != "" {
+		// Before the artifact, so an overlay can never replace the file deployed.
+		layers, overlayRef, err = p.overlay(ctx)
+		if err != nil {
+			return Built{}, err
+		}
+	}
+
 	layer, err := LayerFor(r, p.DestPath)
 	if err != nil {
 		return Built{}, err
 	}
+	layers = append(layers, layer)
 
 	// mutate.AppendLayers returns a NEW image; the base is untouched, which is
 	// what makes caching it safe.
-	img, err := mutate.AppendLayers(base, layer)
+	img, err := mutate.AppendLayers(base, layers...)
 	if err != nil {
 		return Built{}, fmt.Errorf("append layer: %w", err)
 	}
@@ -154,5 +205,5 @@ func (p *Packager) Package(ctx context.Context, r io.Reader) (Built, error) {
 		return Built{}, fmt.Errorf("push %s: %w", dst, err)
 	}
 
-	return Built{Ref: dst.String(), Digest: digest.String(), BaseRef: baseRef}, nil
+	return Built{Ref: dst.String(), Digest: digest.String(), BaseRef: baseRef, OverlayRef: overlayRef}, nil
 }

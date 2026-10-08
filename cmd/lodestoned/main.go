@@ -129,6 +129,7 @@ func buildTargets(cfg config.Config, targets map[string]target.Target) (map[stri
 			Base:     t.BaseImage,
 			Repo:     t.Repo,
 			DestPath: t.DestPath,
+			Overlay:  t.OverlayImage,
 		}
 
 		out[name] = server.TargetSpec{

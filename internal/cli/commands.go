@@ -160,6 +160,9 @@ func runDeploy(ctx context.Context, env Env, g Globals, args []string) error {
 		if res.BaseImage != "" {
 			fmt.Fprintf(env.Out, "base      %s\n", res.BaseImage)
 		}
+		if res.OverlayImage != "" {
+			fmt.Fprintf(env.Out, "overlay   %s\n", res.OverlayImage)
+		}
 		if res.Deployed {
 			fmt.Fprintln(env.Out, "result    deployed")
 		} else {
