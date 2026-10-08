@@ -38,6 +38,9 @@ type Result struct {
 	// answerable after the tag moves.
 	BaseImage string `json:"baseImage,omitempty"`
 
+	// OverlayImage is the overlay appended, pinned by digest, if the target has one.
+	OverlayImage string `json:"overlayImage,omitempty"`
+
 	Replicas *int32  `json:"replicas,omitempty"`
 	Deployed bool    `json:"deployed"` // did the rollout succeed
 	Error    string  `json:"error,omitempty"`
@@ -73,6 +76,7 @@ type LedgerEntry struct {
 	Deployed      bool      `json:"deployed"`
 	Image         string    `json:"image,omitempty"`
 	BaseImage     string    `json:"baseImage,omitempty"`
+	OverlayImage  string    `json:"overlayImage,omitempty"`
 }
 
 // Status is the body of GET /status.

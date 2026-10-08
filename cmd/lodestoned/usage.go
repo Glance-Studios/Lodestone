@@ -56,6 +56,11 @@ and nothing else.
   Kubernetes gets to report why a rollout failed before we stop watching.
   maxReplicas caps what one deploy may scale to.
 
+  overlayImage is optional: an image whose layers go between the base and the
+  artifact, resolved on every deploy like a moving base tag. Build it from
+  scratch with only the files it adds - a directory entry in it replaces that
+  directory's owner and mode in the base.
+
 Endpoints:
   GET  /status                      liveness, version, target names   (public)
   POST /artifacts/{target}          upload and record                 (target token)

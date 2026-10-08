@@ -56,6 +56,10 @@ type Entry struct {
 	// the target names a moving tag. Without it, "which world was this built on?"
 	// has no answer once the tag has moved.
 	BaseImage string `json:"baseImage,omitempty"`
+
+	// OverlayImage is the overlay appended, pinned by digest. Empty for a target
+	// without one.
+	OverlayImage string `json:"overlayImage,omitempty"`
 }
 
 // Ledger is an append-only record persisted as a single JSON file. It is safe
@@ -143,7 +147,7 @@ func (l *Ledger) Append(e Entry) (uint64, error) {
 // Called as soon as the push succeeds, rather than only when a deploy succeeds:
 // a rolled-back deploy still pushed a manifest, and an entry that does not know
 // its image leaves that manifest unreclaimable forever.
-func (l *Ledger) SetImage(seq uint64, imageRef, baseRef string) error {
+func (l *Ledger) SetImage(seq uint64, imageRef, baseRef, overlayRef string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -155,6 +159,7 @@ func (l *Ledger) SetImage(seq uint64, imageRef, baseRef string) error {
 		previous := l.entries[i]
 		l.entries[i].Image = imageRef
 		l.entries[i].BaseImage = baseRef
+		l.entries[i].OverlayImage = overlayRef
 
 		if err := l.save(); err != nil {
 			l.entries[i] = previous // keep memory consistent with disk

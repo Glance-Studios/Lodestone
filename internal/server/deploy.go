@@ -91,7 +91,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 	// Record the manifest now, not after the rollout. The push has already
 	// happened, so the manifest exists whether or not the deploy sticks - and one
 	// the ledger never learned about can never be pruned.
-	if err := t.Ledger.SetImage(seq, built.Ref, built.BaseRef); err != nil {
+	if err := t.Ledger.SetImage(seq, built.Ref, built.BaseRef, built.OverlayRef); err != nil {
 		fmt.Fprintf(os.Stderr, "lodestoned: record image for seq %d: %v\n", seq, err)
 	}
 
@@ -106,13 +106,14 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request, t *targetS
 
 	res := rollout.Collect(events)
 	out := api.Result{
-		Target:    name,
-		Digest:    art.Digest,
-		Image:     built.Ref,
-		BaseImage: built.BaseRef,
-		Replicas:  replicas,
-		Deployed:  res.Succeeded(),
-		Events:    toAPIEvents(res.Events),
+		Target:       name,
+		Digest:       art.Digest,
+		Image:        built.Ref,
+		BaseImage:    built.BaseRef,
+		OverlayImage: built.OverlayRef,
+		Replicas:     replicas,
+		Deployed:     res.Succeeded(),
+		Events:       toAPIEvents(res.Events),
 	}
 
 	status := http.StatusOK
@@ -271,13 +272,14 @@ func streamDeploy(w http.ResponseWriter, name, digest string, built image.Built,
 	})
 
 	final := api.Result{
-		Kind:      api.KindResult,
-		Target:    name,
-		Digest:    digest,
-		Image:     built.Ref,
-		BaseImage: built.BaseRef,
-		Replicas:  replicas,
-		Deployed:  res.Succeeded(),
+		Kind:         api.KindResult,
+		Target:       name,
+		Digest:       digest,
+		Image:        built.Ref,
+		BaseImage:    built.BaseRef,
+		OverlayImage: built.OverlayRef,
+		Replicas:     replicas,
+		Deployed:     res.Succeeded(),
 	}
 	if !res.Succeeded() {
 		final.Error = res.Err.Error()

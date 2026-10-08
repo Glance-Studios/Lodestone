@@ -121,6 +121,7 @@ func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request, t *
 			Deployed:      e.Deployed,
 			Image:         e.Image,
 			BaseImage:     e.BaseImage,
+			OverlayImage:  e.OverlayImage,
 		})
 	}
 

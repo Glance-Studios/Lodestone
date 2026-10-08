@@ -297,7 +297,7 @@ func TestOpenBackfillsMissingSeqs(t *testing.T) {
 func TestSetImageTargetsOneEntry(t *testing.T) {
 	l, seqs := seed(t, 3)
 
-	if err := l.SetImage(seqs[1], "reg/repo@sha256:packaged", "reg/base@sha256:base"); err != nil {
+	if err := l.SetImage(seqs[1], "reg/repo@sha256:packaged", "reg/base@sha256:base", "reg/rigs@sha256:rigs"); err != nil {
 		t.Fatalf("SetImage() error = %v", err)
 	}
 
@@ -310,6 +310,9 @@ func TestSetImageTargetsOneEntry(t *testing.T) {
 			if e.BaseImage != "reg/base@sha256:base" {
 				t.Errorf("BaseImage = %q, want the pinned base", e.BaseImage)
 			}
+			if e.OverlayImage != "reg/rigs@sha256:rigs" {
+				t.Errorf("OverlayImage = %q, want the pinned overlay", e.OverlayImage)
+			}
 		default:
 			if e.BaseImage != "" {
 				t.Errorf("entry %s picked up a base image it was not given", e.Digest)
@@ -321,7 +324,7 @@ func TestSetImageTargetsOneEntry(t *testing.T) {
 func TestSetImageUnknownSeq(t *testing.T) {
 	l, _ := seed(t, 2)
 
-	if err := l.SetImage(9999, "reg/repo@sha256:x", ""); err == nil {
+	if err := l.SetImage(9999, "reg/repo@sha256:x", "", ""); err == nil {
 		t.Error("SetImage() on an unknown seq returned no error")
 	}
 }
@@ -364,7 +367,7 @@ func TestMarkDeployedDoesNotAffectAnEntrySharingItsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
-	if err := l.SetImage(firstSeq, "reg/repo@sha256:onbase4", "reg/base@sha256:four"); err != nil {
+	if err := l.SetImage(firstSeq, "reg/repo@sha256:onbase4", "reg/base@sha256:four", ""); err != nil {
 		t.Fatalf("SetImage() error = %v", err)
 	}
 	if err := l.MarkDeployed(firstSeq); err != nil {
@@ -376,7 +379,7 @@ func TestMarkDeployedDoesNotAffectAnEntrySharingItsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
-	if err := l.SetImage(secondSeq, "reg/repo@sha256:onbase5", "reg/base@sha256:five"); err != nil {
+	if err := l.SetImage(secondSeq, "reg/repo@sha256:onbase5", "reg/base@sha256:five", ""); err != nil {
 		t.Fatalf("SetImage() error = %v", err)
 	}
 	if err := l.MarkDeployed(secondSeq); err != nil {

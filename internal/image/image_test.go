@@ -12,6 +12,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
@@ -414,5 +415,142 @@ func TestPackageOntoScratch(t *testing.T) {
 	}
 	if built.Digest == "" {
 		t.Error("Digest is empty")
+	}
+}
+
+// -- Overlay ------------------------------------------------------------------
+
+// seedOverlay pushes an image holding one file to host/overlay:latest.
+func seedOverlay(t *testing.T, host, content string) string {
+	t.Helper()
+
+	layer, err := LayerFor(strings.NewReader(content), "/models/rig.bbmodel")
+	if err != nil {
+		t.Fatalf("building overlay layer: %v", err)
+	}
+	img, err := mutate.AppendLayers(empty.Image, layer)
+	if err != nil {
+		t.Fatalf("building overlay: %v", err)
+	}
+	ref, err := name.ParseReference(host + "/overlay:latest")
+	if err != nil {
+		t.Fatalf("parsing overlay ref: %v", err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatalf("seeding overlay: %v", err)
+	}
+	return ref.String()
+}
+
+// fileIn reads one file from the topmost layer of image that holds it.
+func fileIn(t *testing.T, ref, file string) string {
+	t.Helper()
+
+	digest, err := name.NewDigest(ref)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", ref, err)
+	}
+	img, err := remote.Image(digest)
+	if err != nil {
+		t.Fatalf("pulling %s: %v", ref, err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("Layers() error = %v", err)
+	}
+	for i := len(layers) - 1; i >= 0; i-- {
+		rc, err := layers[i].Uncompressed()
+		if err != nil {
+			t.Fatalf("Uncompressed() error = %v", err)
+		}
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err != nil {
+				break
+			}
+			if hdr.Name == file {
+				body, _ := io.ReadAll(tr)
+				rc.Close()
+				return string(body)
+			}
+		}
+		rc.Close()
+	}
+	return ""
+}
+
+// The overlay's layers go between the base and the artifact, never above it.
+func TestPackageAppendsTheOverlayBeneathTheArtifact(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host)
+	overlay := seedOverlay(t, host, "rig v1")
+
+	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar", Overlay: overlay}
+	built, err := p.Package(context.Background(), strings.NewReader("jar bytes"))
+	if err != nil {
+		t.Fatalf("Package() error = %v", err)
+	}
+
+	if !strings.Contains(built.OverlayRef, "/overlay@sha256:") {
+		t.Errorf("OverlayRef = %q, want it pinned by digest", built.OverlayRef)
+	}
+	ref, _ := name.NewDigest(built.Ref)
+	pulled, err := remote.Image(ref)
+	if err != nil {
+		t.Fatalf("pulling result: %v", err)
+	}
+	layers, err := pulled.Layers()
+	if err != nil {
+		t.Fatalf("Layers() error = %v", err)
+	}
+	if len(layers) != 4 {
+		t.Fatalf("result has %d layers, want 4 (base 2 + overlay 1 + artifact 1)", len(layers))
+	}
+	jar, _ := LayerFor(strings.NewReader("jar bytes"), "/plugins/app.jar")
+	want, _ := jar.Digest()
+	if top, _ := layers[3].Digest(); top != want {
+		t.Errorf("top layer = %s, want the artifact %s", top, want)
+	}
+	if got := fileIn(t, built.Ref, "models/rig.bbmodel"); got != "rig v1" {
+		t.Errorf("overlay file = %q, want %q", got, "rig v1")
+	}
+}
+
+// WARNING: the overlay is the part expected to move. A packager that kept the
+// first one it pulled would deploy stale model files with every later jar.
+func TestPackageFollowsAMovingOverlayTag(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host)
+	overlay := seedOverlay(t, host, "rig v1")
+
+	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar", Overlay: overlay}
+	first, err := p.Package(context.Background(), strings.NewReader("same jar"))
+	if err != nil {
+		t.Fatalf("first Package() error = %v", err)
+	}
+
+	seedOverlay(t, host, "rig v2")
+	second, err := p.Package(context.Background(), strings.NewReader("same jar"))
+	if err != nil {
+		t.Fatalf("second Package() error = %v", err)
+	}
+
+	if first.OverlayRef == second.OverlayRef {
+		t.Error("the second build reused the first overlay after its tag moved")
+	}
+	if got := fileIn(t, second.Ref, "models/rig.bbmodel"); got != "rig v2" {
+		t.Errorf("overlay file = %q, want %q", got, "rig v2")
+	}
+}
+
+// A missing overlay fails the build rather than shipping without it.
+func TestPackageFailsWithoutItsOverlay(t *testing.T) {
+	host := testRegistry(t)
+	base := seedBase(t, host)
+
+	p := &Packager{Base: base, Repo: host + "/builds", DestPath: "/plugins/app.jar", Overlay: host + "/missing:latest"}
+	if _, err := p.Package(context.Background(), strings.NewReader("jar bytes")); err == nil {
+		t.Error("Package() with a missing overlay returned no error")
 	}
 }
